@@ -75,6 +75,17 @@ type Go {
     builds (module downloads and helper tools), and return empty binaries.
     """
     perPackagePrepare: Boolean! = false,
+    """
+    With perPackage, for diagnosis: print a per-package timeline ("TL"
+    lines) in the build's output. It adds requests, so timed builds leave it
+    off.
+    """
+    perPackageTimeline: Boolean! = false,
+    """
+    With perPackage, for benchmarks: a value that makes package builds run
+    again instead of hitting the cache, keeping downloads and helper tools.
+    """
+    perPackageSalt: String! = "",
   ) {
     if ((mountPath ?? "/").hasPrefix("/") == false) {
       raise "mountPath must be an absolute container path: " + (mountPath ?? "")
@@ -100,6 +111,8 @@ type Go {
       self.perPackageFallback = perPackageFallback
       self.perPackageTiers = perPackageTiers
       self.perPackagePrepare = perPackagePrepare
+      self.perPackageTimeline = perPackageTimeline
+      self.perPackageSalt = perPackageSalt
       self
     }
   }
@@ -164,6 +177,16 @@ type Go {
   With perPackage, whether builds only fetch what precedes the package builds.
   """
   perPackagePrepare: Boolean! = false
+
+  """
+  With perPackage, whether builds print a per-package timeline.
+  """
+  perPackageTimeline: Boolean! = false
+
+  """
+  With perPackage, a value that makes package builds run again.
+  """
+  perPackageSalt: String! = ""
 
   """
   Container path where the workspace is mounted for Go commands: the
@@ -281,6 +304,8 @@ type Go {
       perPackageFallback: perPackageFallback,
       perPackageTiers: perPackageTiers,
       perPackagePrepare: perPackagePrepare,
+      perPackageTimeline: perPackageTimeline,
+      perPackageSalt: perPackageSalt,
     )
   }
 }
@@ -589,6 +614,16 @@ type GoModule {
   With perPackage, whether builds only fetch what precedes the package builds.
   """
   let perPackagePrepare: Boolean!
+
+  """
+  With perPackage, whether builds print a per-package timeline.
+  """
+  let perPackageTimeline: Boolean!
+
+  """
+  With perPackage, a value that makes package builds run again.
+  """
+  let perPackageSalt: String!
 
   """
   The shared library, which answers discovery, selection and source policy for
@@ -1136,6 +1171,8 @@ type GoModule {
           fallback: perPackageFallback,
           tiers: perPackageTiers,
           prepare: perPackagePrepare,
+          timeline: perPackageTimeline,
+          salt: perPackageSalt,
         ),
         what,
       )

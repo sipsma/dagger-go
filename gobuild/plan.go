@@ -32,6 +32,7 @@ type block struct {
 	// so an edit that leaves the main package's archive unchanged relinks
 	// without recompiling it.
 	isLink bool
+	group  string // std, dep or ws, for the timeline
 }
 
 var (

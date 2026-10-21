@@ -76,6 +76,15 @@ func (m *Gobuild) Binary(
 	// first build counts from a warm download like today's build has.
 	// +default=false
 	prepare bool,
+	// Print a per-package timeline to stderr ("TL" lines). For diagnosis:
+	// it adds requests, so a timed build leaves it off.
+	// +default=false
+	timeline bool,
+	// Set, it goes into every package exec's environment and the plan's,
+	// so they run again instead of hitting the cache: a cold build, with
+	// downloads and helper tools still cached.
+	// +optional
+	salt string,
 ) (*dagger.File, error) {
 	cwd := path.Join(mountPath, workdir)
 	single := func(why error) (*dagger.File, error) {
@@ -100,6 +109,11 @@ func (m *Gobuild) Binary(
 		}
 		return dag.Directory().WithNewFile(output, "").File(output), nil
 	}
+	if salt != "" {
+		if b.base, err = b.base.WithEnvVariable("GOBUILD_SALT", salt).Sync(ctx); err != nil {
+			return nil, err
+		}
+	}
 	plan, err := b.plan(ctx, flags, pkg)
 	if err != nil {
 		return nil, err
@@ -115,6 +129,17 @@ func (m *Gobuild) Binary(
 	if err != nil {
 		return nil, err
 	}
+	std, outsideWS := stdSet(blocks), outsideSet(blocks)
+	for id, bl := range blocks {
+		switch {
+		case std[id]:
+			bl.group = "std"
+		case outsideWS[id]:
+			bl.group = "dep"
+		default:
+			bl.group = "ws"
+		}
+	}
 	if err := expandHeaders(ctx, b.mods, blocks); err != nil {
 		return nil, err
 	}
@@ -124,14 +149,14 @@ func (m *Gobuild) Binary(
 	if needsTools(blocks) {
 		go b.tools.Sync(ctx)
 	}
-	w := &walker{base: b.base, tools: b.tools, src: source, mods: b.mods, roots: b.roots, concurrency: concurrency}
+	w := &walker{base: b.base, tools: b.tools, src: source, mods: b.mods, roots: b.roots, concurrency: concurrency, timeline: timeline}
 	outside := map[string]int{}
 	for k, part := range parts {
 		spec, ts, err := newTierSpec(blocks, part, outside, b.roots)
 		if err != nil {
 			return nil, err
 		}
-		opts := dagger.GobuildTierOpts{Lower: w.tiers}
+		opts := dagger.GobuildTierOpts{Lower: w.tiers, Timeline: timeline}
 		for _, n := range ts.Nodes {
 			if n.Tools {
 				opts.Tools = b.tools
@@ -180,6 +205,9 @@ func (m *Gobuild) Tier(
 	// The archives of the tiers below this one, in order.
 	// +optional
 	lower []*dagger.Directory,
+	// Print a per-package timeline to stderr, as Binary's does.
+	// +default=false
+	timeline bool,
 ) (*dagger.Directory, error) {
 	var ts tierSpec
 	if err := json.Unmarshal([]byte(spec), &ts); err != nil {
@@ -196,7 +224,7 @@ func (m *Gobuild) Tier(
 			return nil, err
 		}
 	}
-	w := &walker{base: base, tools: tools, mods: mods, roots: ts.Roots, tiers: lower, concurrency: concurrency}
+	w := &walker{base: base, tools: tools, mods: mods, roots: ts.Roots, tiers: lower, concurrency: concurrency, timeline: timeline}
 	results, err := w.walk(ctx, nodes)
 	if err != nil {
 		return nil, err

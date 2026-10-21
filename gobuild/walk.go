@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"dagger/gobuild/internal/dagger"
 )
@@ -32,6 +34,10 @@ type node struct {
 	Tools  bool   `json:"tools,omitempty"`
 	Output string `json:"output"`
 	Script string `json:"script"`
+	// Group is std, dep or ws, and DepNames every dependency by name, for
+	// the timeline.
+	Group    string   `json:"group"`
+	DepNames []string `json:"depNames"`
 }
 
 type tierDep struct {
@@ -47,7 +53,10 @@ type tierDep struct {
 // tiers whole instead of copying each archive.
 func toNode(b *block, blocks map[string]*block, outside map[string]int) *node {
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: b.deps,
-		SrcFiles: b.srcFiles, ModFiles: b.modFiles, Output: b.output()}
+		SrcFiles: b.srcFiles, ModFiles: b.modFiles, Output: b.output(), Group: b.group}
+	for _, d := range b.deps {
+		n.DepNames = append(n.DepNames, blocks[d].name)
+	}
 	if b.isLink {
 		n.Script = b.script(blocks, outside)
 		seen := map[int]bool{}
@@ -81,12 +90,20 @@ type walker struct {
 	roots       roots
 	tiers       []*dagger.Directory
 	concurrency int
+	// timeline prints, per package, when it became ready, started and
+	// finished its exec, and how long its inputs took to assemble, synced
+	// on their own after it took an exec slot. That adds requests and
+	// changes when inputs are evaluated: for diagnosis, not timing.
+	timeline bool
 }
 
 type result struct {
 	file *dagger.File
 	err  error // set before done closes; dependents read it
 	done chan struct{}
+
+	ready, started, execDone, finished time.Time
+	libDur, srcDur, modDur             time.Duration
 }
 
 func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*result, error) {
@@ -120,8 +137,10 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				// Read from an evaluated tier, so keyed by its content.
 				depFiles = append(depFiles, w.tiers[td.Tier].File(td.Name+".a"))
 			}
+			var libDir, srcDir, modDir *dagger.Directory
 			if len(depFiles) > 0 {
-				ctr = ctr.WithMountedDirectory("/work/lib", w.assemble(depFiles))
+				libDir = w.assemble(depFiles)
+				ctr = ctr.WithMountedDirectory("/work/lib", libDir)
 			}
 			for _, k := range n.Tiers {
 				ctr = ctr.WithMountedDirectory(fmt.Sprintf("/work/t%d", k), w.tiers[k],
@@ -131,12 +150,16 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if len(n.SrcFiles) > 0 {
-				dir, at := selected(w.src, n.SrcFiles)
-				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), dir)
+				var at string
+				srcDir, at = selected(w.src, n.SrcFiles)
+				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir)
 			}
 			if len(n.ModFiles) > 0 {
-				ctr = ctr.WithMountedDirectory(w.roots.Mod, fileTree(w.mods, n.ModFiles))
+				modDir = fileTree(w.mods, n.ModFiles)
+				ctr = ctr.WithMountedDirectory(w.roots.Mod, modDir)
 			}
+			r.ready = time.Now()
+			defer func() { r.finished = time.Now() }()
 			// A script past the kernel's argument-size limit (the link's
 			// import config at a large project's scale) goes in as a file.
 			var ran *dagger.Container
@@ -147,6 +170,27 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			}
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if w.timeline {
+				timed := func(d *dagger.Directory) (time.Duration, error) {
+					if d == nil {
+						return 0, nil
+					}
+					t := time.Now()
+					_, err := d.Sync(ctx)
+					return time.Since(t), err
+				}
+				var err error
+				if r.libDur, err = timed(libDir); err == nil {
+					if r.srcDur, err = timed(srcDir); err == nil {
+						r.modDur, err = timed(modDir)
+					}
+				}
+				if err != nil {
+					r.err = fmt.Errorf("%s: inputs: %w", n.ImportPath, err)
+					return
+				}
+			}
+			r.started = time.Now()
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
@@ -156,10 +200,14 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				r.err = err
 				return
 			}
+			r.execDone = time.Now()
 			r.file, r.err = out.File(n.Output).Sync(ctx)
 		}()
 	}
 	wg.Wait()
+	if w.timeline {
+		printTimeline(nodes, results)
+	}
 	var errs []string
 	for _, n := range nodes {
 		if r := results[n.ID]; r.err != nil {
@@ -173,6 +221,36 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 		return nil, fmt.Errorf("%s", shortest(errs))
 	}
 	return results, nil
+}
+
+// printTimeline writes one "TL <json>" line per package to stderr, with
+// times in Unix milliseconds, so walks in separate calls line up.
+func printTimeline(nodes map[string]*node, results map[string]*result) {
+	type line struct {
+		Pkg      string   `json:"pkg"`
+		Name     string   `json:"name"`
+		Group    string   `json:"group"`
+		Deps     []string `json:"deps"`
+		Ready    int64    `json:"ready"`
+		Started  int64    `json:"started"`
+		ExecDone int64    `json:"execDone"`
+		Finished int64    `json:"finished"`
+		LibMs    int64    `json:"libMs"`
+		SrcMs    int64    `json:"srcMs"`
+		ModMs    int64    `json:"modMs"`
+	}
+	for id, n := range nodes {
+		r := results[id]
+		pkg := n.ImportPath
+		if n.Output != n.Name+".a" {
+			pkg += " (link)"
+		}
+		j, err := json.Marshal(line{pkg, n.Name, n.Group, n.DepNames, r.ready.UnixMilli(), r.started.UnixMilli(),
+			r.execDone.UnixMilli(), r.finished.UnixMilli(), r.libDur.Milliseconds(), r.srcDur.Milliseconds(), r.modDur.Milliseconds()})
+		if err == nil {
+			fmt.Fprintln(os.Stderr, "TL "+string(j))
+		}
+	}
 }
 
 // shortest is the failure at the bottom of a chain: a dependent's error

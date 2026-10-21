@@ -55,6 +55,13 @@ type GobuildBinaryOpts struct {
 	// the helper tools, and return an empty file. For benchmarks, whose
 	// first build counts from a warm download like today's build has.
 	Prepare bool
+	// Print a per-package timeline to stderr ("TL" lines). For diagnosis:
+	// it adds requests, so a timed build leaves it off.
+	Timeline bool
+	// Set, it goes into every package exec's environment and the plan's,
+	// so they run again instead of hitting the cache: a cold build, with
+	// downloads and helper tools still cached.
+	Salt string
 }
 
 // Binary builds the main package pkg as "go build" would and returns the
@@ -92,6 +99,14 @@ func (r *Gobuild) Binary(base *Container, source *Directory, mountPath string, p
 		// `prepare` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Prepare) {
 			q = q.Arg("prepare", opts[i].Prepare)
+		}
+		// `timeline` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Timeline) {
+			q = q.Arg("timeline", opts[i].Timeline)
+		}
+		// `salt` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Salt) {
+			q = q.Arg("salt", opts[i].Salt)
 		}
 	}
 	q = q.Arg("base", base)
@@ -169,6 +184,8 @@ type GobuildTierOpts struct {
 	Mods *Directory
 	// The archives of the tiers below this one, in order.
 	Lower []*Directory
+	// Print a per-package timeline to stderr, as Binary's does.
+	Timeline bool
 }
 
 // Tier builds one tier of a build's packages, as Binary's spec describes
@@ -190,6 +207,10 @@ func (r *Gobuild) Tier(spec string, base *Container, concurrency int, opts ...Go
 		// `lower` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Lower) {
 			q = q.Arg("lower", opts[i].Lower)
+		}
+		// `timeline` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Timeline) {
+			q = q.Arg("timeline", opts[i].Timeline)
 		}
 	}
 	q = q.Arg("spec", spec)
