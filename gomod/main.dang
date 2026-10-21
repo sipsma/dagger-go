@@ -928,7 +928,70 @@ type GoMod {
     generate: Boolean! = false,
     extra: [String!]! = [],
   ): Directory! {
-    ws.directory("/", include: include(ws, test: test, generate: generate, extra: extra))
+    ws.directory("/", include: withoutCovered(include(ws, test: test, generate: generate, extra: extra)))
+  }
+
+  # patterns less those another of them already covers, for the same files from
+  # fewer patterns to match: a replaced module's base patterns, such as
+  # sdk/go/**/*.go, are covered by the replacing root's **/*.go. Only a
+  # treeGlob covers others. With a "!" anywhere in a pattern, which may make it
+  # an exclusion once normalized (as "./!main.go"), order matters, and the list
+  # is kept as it is.
+  let withoutCovered(patterns: [String!]!): [String!]! {
+    if (patterns.any { p => p.match(`!`) != null }) {
+      patterns
+    } else {
+      let unique = patterns.uniq
+      let trees = unique.filter { p => treeGlob(p) }
+      unique.filter { p => trees.any { tree => tree != p and covers(tree, p) } == false }
+    }
+  }
+
+  # Whether a pattern is a plain directory path, then "**", then one final
+  # element: dir/**/*.go, or **/go.mod.
+  let treeGlob(pattern: String!): Boolean! {
+    let segments = pattern.split("/")
+    segments.length >= 2
+      and segments[segments.length - 2]! == "**"
+      and segments[segments.length - 1]! != "**"
+      and segments[segments.length - 1]! != ""
+      and plainSegments(segments.dropLast(2))
+  }
+
+  # Whether tree, a treeGlob, matches every path that pattern matches: below
+  # tree's directory through plain directories, with or without a "**" just
+  # before it, pattern ends in an element that tree's final element matches.
+  let covers(tree: String!, pattern: String!): Boolean! {
+    let t = tree.split("/")
+    let p = pattern.split("/")
+    let dir = t.dropLast(2)
+    let middle = p.dropLast(1).dropFirst(dir.length)
+    let plainMiddle = if (middle.length > 0 and middle[middle.length - 1]! == "**") {
+      middle.dropLast(1)
+    } else {
+      middle
+    }
+    p.length > dir.length
+      and p.takeFirst(dir.length).join("/") == dir.join("/")
+      and elementCovers(t[t.length - 1]!, p[p.length - 1]!)
+      and plainSegments(plainMiddle)
+  }
+
+  # Whether a final pattern element matches every name another does: the same
+  # element, or a plain name ending in what follows a leading "*" with no other
+  # wildcard, as "*.go" matches "main.go".
+  let elementCovers(element: String!, other: String!): Boolean! {
+    let rest = element.trimPrefix("*")
+    element == other
+      or (element.hasPrefix("*") and plainSegments([rest, other]) and other.hasSuffix(rest))
+  }
+
+  # Whether path segments name directories literally: no wildcards, and no
+  # empty, "." or ".." segments.
+  let plainSegments(segments: [String!]!): Boolean! {
+    segments.all { segment =>
+      segment != "" and segment != "." and segment != ".." and segment.match(`[*?\[\\]`) == null
+    }
   }
 
   """
