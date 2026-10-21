@@ -64,6 +64,17 @@ type Go {
     wrong build.
     """
     perPackageFallback: Boolean! = true,
+    """
+    With perPackage, which packages separately cached calls build: "none",
+    "outside" (the standard library and dependency modules, as one tier) or
+    "split" (the standard library, then dependency modules).
+    """
+    perPackageTiers: String! = "outside",
+    """
+    With perPackage, for benchmarks: fetch only what precedes the package
+    builds (module downloads and helper tools), and return empty binaries.
+    """
+    perPackagePrepare: Boolean! = false,
   ) {
     if ((mountPath ?? "/").hasPrefix("/") == false) {
       raise "mountPath must be an absolute container path: " + (mountPath ?? "")
@@ -87,6 +98,8 @@ type Go {
       self.mountPath = mountPath
       self.perPackage = perPackage
       self.perPackageFallback = perPackageFallback
+      self.perPackageTiers = perPackageTiers
+      self.perPackagePrepare = perPackagePrepare
       self
     }
   }
@@ -141,6 +154,16 @@ type Go {
   failing.
   """
   perPackageFallback: Boolean! = true
+
+  """
+  With perPackage, which packages separately cached calls build.
+  """
+  perPackageTiers: String! = "outside"
+
+  """
+  With perPackage, whether builds only fetch what precedes the package builds.
+  """
+  perPackagePrepare: Boolean! = false
 
   """
   Container path where the workspace is mounted for Go commands: the
@@ -256,6 +279,8 @@ type Go {
       mountPath: mount,
       perPackage: perPackage,
       perPackageFallback: perPackageFallback,
+      perPackageTiers: perPackageTiers,
+      perPackagePrepare: perPackagePrepare,
     )
   }
 }
@@ -554,6 +579,16 @@ type GoModule {
   failing.
   """
   let perPackageFallback: Boolean!
+
+  """
+  With perPackage, which packages separately cached calls build.
+  """
+  let perPackageTiers: String!
+
+  """
+  With perPackage, whether builds only fetch what precedes the package builds.
+  """
+  let perPackagePrepare: Boolean!
 
   """
   The shared library, which answers discovery, selection and source policy for
@@ -1099,6 +1134,8 @@ type GoModule {
           output: name,
           flags: buildFlags,
           fallback: perPackageFallback,
+          tiers: perPackageTiers,
+          prepare: perPackagePrepare,
         ),
         what,
       )

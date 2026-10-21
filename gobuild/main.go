@@ -71,6 +71,11 @@ func (m *Gobuild) Binary(
 	// an error instead, so a measurement can't time the wrong build.
 	// +default=true
 	fallback bool,
+	// Only fetch what precedes the package builds, the module downloads and
+	// the helper tools, and return an empty file. For benchmarks, whose
+	// first build counts from a warm download like today's build has.
+	// +default=false
+	prepare bool,
 ) (*dagger.File, error) {
 	cwd := path.Join(mountPath, workdir)
 	single := func(why error) (*dagger.File, error) {
@@ -85,6 +90,15 @@ func (m *Gobuild) Binary(
 	b, err := newBuild(ctx, base, source, mountPath, cwd)
 	if err != nil {
 		return nil, err
+	}
+	if prepare {
+		if _, err := hdrTool().Sync(ctx); err != nil {
+			return nil, err
+		}
+		if _, err := b.tools.Sync(ctx); err != nil {
+			return nil, err
+		}
+		return dag.Directory().WithNewFile(output, "").File(output), nil
 	}
 	plan, err := b.plan(ctx, flags, pkg)
 	if err != nil {

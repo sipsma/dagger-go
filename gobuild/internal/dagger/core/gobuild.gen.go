@@ -51,6 +51,10 @@ type GobuildBinaryOpts struct {
 	//
 	// Default: true
 	Fallback bool
+	// Only fetch what precedes the package builds, the module downloads and
+	// the helper tools, and return an empty file. For benchmarks, whose
+	// first build counts from a warm download like today's build has.
+	Prepare bool
 }
 
 // Binary builds the main package pkg as "go build" would and returns the
@@ -84,6 +88,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, mountPath string, p
 		// `fallback` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Fallback) {
 			q = q.Arg("fallback", opts[i].Fallback)
+		}
+		// `prepare` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Prepare) {
+			q = q.Arg("prepare", opts[i].Prepare)
 		}
 	}
 	q = q.Arg("base", base)

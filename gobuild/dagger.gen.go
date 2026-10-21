@@ -268,7 +268,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg fallback", err))
 				}
 			}
-			return (*Gobuild).Binary(&parent, ctx, base, source, mountPath, workdir, pkg, output, flags, tiers, concurrency, fallback)
+			var prepare bool
+			if inputArgs["prepare"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["prepare"]), &prepare)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg prepare", err))
+				}
+			}
+			return (*Gobuild).Binary(&parent, ctx, base, source, mountPath, workdir, pkg, output, flags, tiers, concurrency, fallback, prepare)
 		case "Tier":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -340,18 +347,19 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go build, before the package.", SourceMap: dag.SourceMap("main.go", 61, 2)}).
 							WithArg("tiers", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Which packages separately cached calls build: none, outside (the\nstandard library and dependency modules, as one tier) or split (the\nstandard library, then dependency modules).", SourceMap: dag.SourceMap("main.go", 66, 2), DefaultValue: dagger.JSON("\"outside\"")}).
 							WithArg("concurrency", dag.TypeDef().WithKind(dagger.TypeDefKindIntegerKind), dagger.FunctionWithArgOpts{Description: "How many package execs run at once.", SourceMap: dag.SourceMap("main.go", 69, 2), DefaultValue: dagger.JSON("16")}).
-							WithArg("fallback", dag.TypeDef().WithKind(dagger.TypeDefKindBooleanKind), dagger.FunctionWithArgOpts{Description: "Build with one go build when the per-package build can't. Off, that's\nan error instead, so a measurement can't time the wrong build.", SourceMap: dag.SourceMap("main.go", 73, 2), DefaultValue: dagger.JSON("true")})).
+							WithArg("fallback", dag.TypeDef().WithKind(dagger.TypeDefKindBooleanKind), dagger.FunctionWithArgOpts{Description: "Build with one go build when the per-package build can't. Off, that's\nan error instead, so a measurement can't time the wrong build.", SourceMap: dag.SourceMap("main.go", 73, 2), DefaultValue: dagger.JSON("true")}).
+							WithArg("prepare", dag.TypeDef().WithKind(dagger.TypeDefKindBooleanKind), dagger.FunctionWithArgOpts{Description: "Only fetch what precedes the package builds, the module downloads and\nthe helper tools, and return an empty file. For benchmarks, whose\nfirst build counts from a warm download like today's build has.", SourceMap: dag.SourceMap("main.go", 78, 2), DefaultValue: dagger.JSON("false")})).
 					WithFunction(
 						dag.Function("Tier",
 							dag.TypeDef().WithObject("Directory")).
 							WithDescription("Tier builds one tier of a build's packages, as Binary's spec describes\nit, and returns their archives, each named <name>.a. It is a function of\nits own so the whole tier is one cached call: unchanged, a build pays one\ncache hit for it instead of walking its packages.").
-							WithSourceMap(dag.SourceMap("main.go", 155, 1)).
-							WithArg("spec", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 157, 2)}).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 158, 2)}).
-							WithArg("concurrency", dag.TypeDef().WithKind(dagger.TypeDefKindIntegerKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 159, 2)}).
-							WithArg("tools", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The pack tool, when a package in the tier runs it.", SourceMap: dag.SourceMap("main.go", 162, 2)}).
-							WithArg("mods", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The module cache, when a package in the tier reads from it.", SourceMap: dag.SourceMap("main.go", 165, 2)}).
-							WithArg("lower", dag.TypeDef().WithListOf(dag.TypeDef().WithObject("Directory")).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The archives of the tiers below this one, in order.", SourceMap: dag.SourceMap("main.go", 168, 2)}))), nil
+							WithSourceMap(dag.SourceMap("main.go", 169, 1)).
+							WithArg("spec", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 171, 2)}).
+							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 172, 2)}).
+							WithArg("concurrency", dag.TypeDef().WithKind(dagger.TypeDefKindIntegerKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 173, 2)}).
+							WithArg("tools", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The pack tool, when a package in the tier runs it.", SourceMap: dag.SourceMap("main.go", 176, 2)}).
+							WithArg("mods", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The module cache, when a package in the tier reads from it.", SourceMap: dag.SourceMap("main.go", 179, 2)}).
+							WithArg("lower", dag.TypeDef().WithListOf(dag.TypeDef().WithObject("Directory")).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The archives of the tiers below this one, in order.", SourceMap: dag.SourceMap("main.go", 182, 2)}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}
