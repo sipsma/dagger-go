@@ -52,6 +52,18 @@ type Go {
     Where to mount the workspace in Go containers. Defaults to "/src/<workspace name>".
     """
     mountPath: String = null,
+    """
+    Build binaries with one cached exec per package, so an edit rebuilds only
+    the packages it reaches. Experimental. Builds it can't do that way (a
+    custom base, cgo, flags such as -race) use one go build, as without it.
+    """
+    perPackage: Boolean! = false,
+    """
+    With perPackage, build with one go build when the per-package build
+    can't. Off, that's an error instead, so a measurement can't time the
+    wrong build.
+    """
+    perPackageFallback: Boolean! = true,
   ) {
     if ((mountPath ?? "/").hasPrefix("/") == false) {
       raise "mountPath must be an absolute container path: " + (mountPath ?? "")
@@ -73,6 +85,8 @@ type Go {
       self.buildFlags = buildFlags
       self.goflags = goflags
       self.mountPath = mountPath
+      self.perPackage = perPackage
+      self.perPackageFallback = perPackageFallback
       self
     }
   }
@@ -116,6 +130,17 @@ type Go {
   Configured workspace mount path. Null uses "/src/<workspace name>".
   """
   mountPath: String
+
+  """
+  Whether binaries are built with one cached exec per package.
+  """
+  perPackage: Boolean! = false
+
+  """
+  With perPackage, whether a build it can't do uses one go build instead of
+  failing.
+  """
+  perPackageFallback: Boolean! = true
 
   """
   Container path where the workspace is mounted for Go commands: the
@@ -229,6 +254,8 @@ type Go {
       buildFlags: buildFlags,
       goflags: goflags,
       mountPath: mount,
+      perPackage: perPackage,
+      perPackageFallback: perPackageFallback,
     )
   }
 }
@@ -516,6 +543,17 @@ type GoModule {
   Where the workspace is mounted in Go containers.
   """
   mountPath: String!
+
+  """
+  Whether binaries are built with one cached exec per package.
+  """
+  let perPackage: Boolean!
+
+  """
+  With perPackage, whether a build it can't do uses one go build instead of
+  failing.
+  """
+  let perPackageFallback: Boolean!
 
   """
   The shared library, which answers discovery, selection and source policy for
@@ -1027,22 +1065,49 @@ type GoModule {
   cross-compiles, so nothing is emulated.
   """
   let buildEnv(ws: Workspace!, platform: String!): Container! {
+    platformBase(ws, platform).withDirectory(".", source(ws)).withWorkdir(path)
+  }
+
+  # This module's Go container targeting a GOOS/GOARCH platform, before
+  # source is added.
+  let platformBase(ws: Workspace!, platform: String!): Container! {
     let target = platform.split("/")
     base(ws)
       .withEnvVariable("GOOS", target.takeFirst(1).join(""))
       .withEnvVariable("GOARCH", target.takeLast(1).join(""))
-      .withDirectory(".", source(ws))
-      .withWorkdir(path)
   }
 
   """
   The binary for one main package, as go build names it.
   """
   let buildBinary(ws: Workspace!, platform: String!, pkg: String!, name: String!): File! {
-    built(
-      buildEnv(ws, platform).withExec(["go", "build"] + buildFlags + ["-o", "/out/" + name, packageArg(pkg)]),
-      "Go binary " + packagePath(pkg) + " for " + platform,
-    ).file("/out/" + name)
+    let what = "Go binary " + packagePath(pkg) + " for " + platform
+    # A custom base may bring a C toolchain, and so cgo, which the
+    # per-package build doesn't do. The helper picks one go build itself for
+    # anything else it can't do, from the build's plan.
+    if (perPackage and baseImage != null and perPackageFallback == false) {
+      raise what + ": a custom base needs one go build, and perPackageFallback is off"
+    }
+    if (perPackage and baseImage == null) {
+      builtFile(
+        gobuild.binary(
+          base: platformBase(ws, platform),
+          source: source(ws),
+          mountPath: mountPath,
+          workdir: path,
+          pkg: packageArg(pkg),
+          output: name,
+          flags: buildFlags,
+          fallback: perPackageFallback,
+        ),
+        what,
+      )
+    } else {
+      built(
+        buildEnv(ws, platform).withExec(["go", "build"] + buildFlags + ["-o", "/out/" + name, packageArg(pkg)]),
+        what,
+      ).file("/out/" + name)
+    }
   }
 
   # A build container that has run, raising its failure under a name: the
@@ -1052,6 +1117,14 @@ type GoModule {
       err: Error => raise what + ": " + err.message
     }
     ctr
+  }
+
+  # A built file, raising its failure under a name, as built does.
+  let builtFile(file: File!, what: String!): File! {
+    file.sync rescue {
+      err: Error => raise what + ": " + err.message
+    }
+    file
   }
 
   # The workspace package paths among pkgPaths that are main packages selected
@@ -1093,7 +1166,15 @@ type GoModule {
 
   # The binaries of the main packages among pkgPaths, from one go build.
   let binaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {
-    buildBinaries(ws, platform, mainPackages(ws, pkgPaths).map { p => relativeDir(p) })
+    if (perPackage and baseImage == null) {
+      # One per-package build each: they share the packages they have in
+      # common through the cache, not through one go build.
+      mainPackages(ws, pkgPaths).reduce(directory) { out, p =>
+        out.withFile(binaryFileName(ws, p, platform), binaryFile(ws, platform, p))
+      }
+    } else {
+      buildBinaries(ws, platform, mainPackages(ws, pkgPaths).map { p => relativeDir(p) })
+    }
   }
 
   """
