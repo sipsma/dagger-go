@@ -242,12 +242,9 @@ type Go {
     goModuleAt(lib.module(ws, pkgPath).path, mount)
   }
 
-  # Byte-order sort, as Go's sort.Strings.
+  # Byte-order sort, as Go's sort.Strings, done natively by dang.
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
-    }
+    items.sorted
   }
 
   """
@@ -847,12 +844,9 @@ type GoModule {
     ).{{filePath, matchedLines}}
   }
 
-  # Byte-order sort, as Go's sort.Strings.
+  # Byte-order sort, as Go's sort.Strings, done natively by dang.
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
-    }
+    items.sorted
   }
 
   # The workspace path of a package directory in this module.
