@@ -2,16 +2,19 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 )
 
 // generateDirectoriesFor scans command lines as go generate does, rather than
-// mistaking go:generate:include annotations for executable directives.
+// mistaking go:generate:include annotations for executable directives. The
+// lines are scanned when the module's directives are parsed, from the same
+// read of each file.
 func (index *localIndex) generateDirectoriesFor(moduleRoot string) ([]string, error) {
+	if _, err := index.directives(moduleRoot); err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	for _, file := range index.goFilesByModule[moduleRoot] {
 		// Go ignores these files, even when selecting their package explicitly.
@@ -19,15 +22,8 @@ func (index *localIndex) generateDirectoriesFor(moduleRoot string) ([]string, er
 		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(file)))
-		if err != nil {
-			return nil, err
-		}
-		for line := range strings.SplitSeq(string(data), "\n") {
-			if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
-				seen[path.Dir(file)] = true
-				break
-			}
+		if index.generateFiles[file] {
+			seen[path.Dir(file)] = true
 		}
 	}
 	var dirs []string
@@ -36,6 +32,17 @@ func (index *localIndex) generateDirectoriesFor(moduleRoot string) ([]string, er
 	}
 	sort.Strings(dirs)
 	return dirs, nil
+}
+
+// hasGenerateCommand reports whether a Go file holds a go:generate command
+// line.
+func hasGenerateCommand(data []byte) bool {
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
+			return true
+		}
+	}
+	return false
 }
 
 // generateContainersFor uses the same parsed comments and directory scope as
