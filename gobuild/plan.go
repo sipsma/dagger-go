@@ -277,7 +277,11 @@ func (b *block) script(blocks map[string]*block, outside map[string]int) string 
 	var body strings.Builder
 	var heredoc []string
 	heredocTarget := ""
-	for _, l := range b.lines {
+	needed := cdNeeded(b.lines)
+	for i, l := range b.lines {
+		if isCd(l) && !needed[i] {
+			continue
+		}
 		l = reBuildID.ReplaceAllString(l, "")
 		l = reConc.ReplaceAllString(l, " -c=4")
 		// The go command packs archives in-process; "go tool pack" would
@@ -324,6 +328,30 @@ func (b *block) script(blocks map[string]*block, outside map[string]int) string 
 		body.WriteString(l + "\n")
 	}
 	return "set -e\n# " + b.importPath + "\nmkdir -p " + strings.Join(dirs, " ") + "\n" + body.String()
+}
+
+// isCd reports whether a plan line changes directory: the go command's own
+// "cd", or the "mkdir -p DIR && cd DIR" parsePlan starts each block with.
+func isCd(l string) bool {
+	return strings.HasPrefix(l, "cd ") || (strings.HasPrefix(l, "mkdir -p ") && strings.Contains(l, " && cd "))
+}
+
+// cdNeeded reports, by line index, which directory changes matter: those a
+// later line uses through a relative path before the next change. The
+// others are left out, so a package's exec doesn't carry the directory the
+// build happened to be in (the project's mount path, or the previous
+// package's directory) and two projects can share it.
+func cdNeeded(lines []string) map[int]bool {
+	needed := map[int]bool{}
+	last := -1
+	for i, l := range lines {
+		if isCd(l) {
+			last = i
+		} else if last >= 0 && reRelFile.MatchString(l) {
+			needed[last] = true
+		}
+	}
+	return needed
 }
 
 // linkLine is the plan's link command, or "" for a block that doesn't link.

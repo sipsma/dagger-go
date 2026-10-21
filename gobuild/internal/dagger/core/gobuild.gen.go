@@ -30,6 +30,11 @@ func (r *Gobuild) WithGraphQLQuery(q *querybuilder.Selection) *Gobuild {
 
 // GobuildBinaryOpts contains options for Gobuild.Binary
 type GobuildBinaryOpts struct {
+	// The image base was made from. Set, package execs run in that image
+	// with base's environment alone, so their keys don't carry how base was
+	// made (a workdir at the project's mount path, its cache mounts), and
+	// projects with the same image and settings share them.
+	Image string
 	// The directory to run go build in, relative to mountPath.
 	//
 	// Default: "."
@@ -76,6 +81,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, mountPath string, p
 	assertNotNil("source", source)
 	q := r.query.Select("binary")
 	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
 		// `workdir` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Workdir) {
 			q = q.Arg("workdir", opts[i].Workdir)

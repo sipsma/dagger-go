@@ -1162,6 +1162,7 @@ type GoModule {
       builtFile(
         gobuild.binary(
           base: platformBase(ws, platform),
+          image: gomod.goImage(toolchainVersion(ws)),
           source: source(ws),
           mountPath: mountPath,
           workdir: path,

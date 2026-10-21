@@ -333,6 +333,13 @@ type Gomod {
   defaultGoVersion: String! { scannerVersion }
 
   """
+  The image goContainer starts from for a Go version.
+  """
+  goImage(version: String!): String! {
+    "golang:" + version + "-alpine"
+  }
+
+  """
   A Go toolchain container at `version`, with the shared Go caches mounted.
 
   Every tool in the workspace builds its module containers from this, so two
@@ -347,7 +354,7 @@ type Gomod {
     """
     cgo: Boolean! = false,
   ): Container! {
-    let ctr = withGoCaches(container.from("golang:" + version + "-alpine").withoutEntrypoint)
+    let ctr = withGoCaches(container.from(goImage(version)).withoutEntrypoint)
     if (cgo) { ctr.withExec(["apk", "add", "--no-cache", "build-base"]) } else { ctr }
   }
 

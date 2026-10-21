@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"dagger/gobuild/internal/dagger"
 )
@@ -44,6 +45,12 @@ func (m *Gobuild) Binary(
 	// its environment (GOOS, GOARCH, GOFLAGS, GOPROXY...) applies. Per
 	// package, its mounts, such as Go cache volumes, are left out.
 	base *dagger.Container,
+	// The image base was made from. Set, package execs run in that image
+	// with base's environment alone, so their keys don't carry how base was
+	// made (a workdir at the project's mount path, its cache mounts), and
+	// projects with the same image and settings share them.
+	// +optional
+	image string,
 	// The source tree.
 	source *dagger.Directory,
 	// Where source is mounted. Paths in the binary's debug information
@@ -96,7 +103,7 @@ func (m *Gobuild) Binary(
 	if err := checkFlags(flags); err != nil {
 		return single(err)
 	}
-	b, err := newBuild(ctx, base, source, mountPath, cwd)
+	b, err := newBuild(ctx, base, image, source, mountPath, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -247,13 +254,18 @@ type build struct {
 	roots roots
 }
 
-func newBuild(ctx context.Context, ctr *dagger.Container, source *dagger.Directory, mountPath, cwd string) (*build, error) {
+func newBuild(ctx context.Context, ctr *dagger.Container, image string, source *dagger.Directory, mountPath, cwd string) (*build, error) {
 	mounts, err := ctr.Mounts(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, m := range mounts {
 		ctr = ctr.WithoutMount(m)
+	}
+	if image != "" {
+		if ctr, err = canonical(ctx, ctr, image); err != nil {
+			return nil, err
+		}
 	}
 	gomodcache, err := ctr.EnvVariable(ctx, "GOMODCACHE")
 	if err != nil {
@@ -294,6 +306,36 @@ func newBuild(ctx context.Context, ctr *dagger.Container, source *dagger.Directo
 		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, noNest).
 		Directory(toolsDir)
 	return b, nil
+}
+
+// canonical is image with ctr's environment and nothing else.
+func canonical(ctx context.Context, ctr *dagger.Container, image string) (*dagger.Container, error) {
+	vars, err := ctr.EnvVariables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(vars))
+	values := make([]string, len(vars))
+	errs := make([]error, len(vars))
+	var wg sync.WaitGroup
+	for i, v := range vars {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if names[i], errs[i] = v.Name(ctx); errs[i] == nil {
+				values[i], errs[i] = v.Value(ctx)
+			}
+		}()
+	}
+	wg.Wait()
+	out := dag.Container().From(image)
+	for i := range vars {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		out = out.WithEnvVariable(names[i], values[i])
+	}
+	return out, nil
 }
 
 // plan is go build's plan for pkg, made from a header pack of the source.
