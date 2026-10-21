@@ -13,9 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -33,12 +31,8 @@ const toolImage = "golang:1.26-alpine"
 var noNest = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true}
 
 // Binary builds the main package pkg as "go build" would and returns the
-// binary, named output, without a Go build ID.
-//
-// A plan it can't replay per package (cgo, PGO, flags such as -race or
-// -toolexec) is built with one "go build" in base instead, as before, unless
-// fallback is off: the choice is made from the plan, before anything is
-// compiled.
+// binary, named output, without a Go build ID. A build it can't replay per
+// package yet (cgo, PGO, flags such as -race or -toolexec) is an error.
 func (m *Gobuild) Binary(
 	ctx context.Context,
 	// The Go container to build in: its image supplies the toolchain, and
@@ -74,10 +68,6 @@ func (m *Gobuild) Binary(
 	// How many package execs run at once.
 	// +default=16
 	concurrency int,
-	// Build with one go build when the per-package build can't. Off, that's
-	// an error instead, so a measurement can't time the wrong build.
-	// +default=true
-	fallback bool,
 	// Only fetch what precedes the package builds, the module downloads and
 	// the helper tools, and return an empty file. For benchmarks, whose
 	// first build counts from a warm download like today's build has.
@@ -94,14 +84,8 @@ func (m *Gobuild) Binary(
 	salt string,
 ) (*dagger.File, error) {
 	cwd := path.Join(mountPath, workdir)
-	single := func(why error) (*dagger.File, error) {
-		if !fallback {
-			return nil, fmt.Errorf("gobuild: %s needs one go build, and fallback is off: %w", pkg, why)
-		}
-		return oneBuild(base, source, mountPath, cwd, pkg, output, flags, why), nil
-	}
 	if err := checkFlags(flags); err != nil {
-		return single(err)
+		return nil, err
 	}
 	b, err := newBuild(ctx, base, image, source, mountPath, cwd)
 	if err != nil {
@@ -126,9 +110,6 @@ func (m *Gobuild) Binary(
 		return nil, err
 	}
 	blocks, err := parsePlan(plan, b.roots)
-	if errors.Is(err, errUnsupported) {
-		return single(err)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -368,20 +349,6 @@ func (b *build) plan(ctx context.Context, flags []string, pkg string) (string, e
 		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) +
 			" && cd " + shQuote(b.roots.Cwd) + " && " + strings.Join(quoted, " ") + " 2> /gobuild/plan.txt"}, noNest).
 		File("/gobuild/plan.txt").Contents(ctx)
-}
-
-// oneBuild is today's build, one go build in base with its cache volumes,
-// for a build this one can't replay. It says why, since the result alone
-// doesn't show which build made it.
-func oneBuild(base *dagger.Container, source *dagger.Directory, mountPath, cwd, pkg, output string, flags []string, why error) *dagger.File {
-	fmt.Fprintf(os.Stderr, "gobuild: building %s with one go build: %v\n", pkg, why)
-	cmd := append([]string{"go", "build"}, flags...)
-	cmd = append(cmd, "-o", "/out/"+output, pkg)
-	return base.
-		WithDirectory(mountPath, source).
-		WithWorkdir(cwd).
-		WithExec(cmd).
-		File("/out/" + output)
 }
 
 func needsTools(blocks map[string]*block) bool {

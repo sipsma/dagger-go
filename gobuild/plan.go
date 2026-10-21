@@ -158,8 +158,8 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			continue
 		}
 		// Steps other than a package's compile and link come without a
-		// package header. Those this build knows it can't replay make it
-		// fall back; any other is a plan it doesn't understand.
+		// package header: cgo and a PGO profile's preprocessing aren't done
+		// yet, and anything else is a plan this build doesn't understand.
 		for _, l := range b.lines {
 			if strings.Contains(l, "/preprofile ") || strings.Contains(l, "/cgo ") {
 				return nil, fmt.Errorf("%w: step %s: %s", errUnsupported, id, l)
@@ -209,7 +209,7 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 	return blocks, nil
 }
 
-// errUnsupported marks a plan this per-package build cannot replay.
+// errUnsupported marks what the per-package build doesn't do yet.
 var errUnsupported = errors.New("unsupported for a per-package build")
 
 // splitLink moves the main package's link out of its block (b001) into a

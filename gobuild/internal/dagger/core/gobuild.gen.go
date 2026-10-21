@@ -51,11 +51,6 @@ type GobuildBinaryOpts struct {
 	//
 	// Default: 16
 	Concurrency int
-	// Build with one go build when the per-package build can't. Off, that's
-	// an error instead, so a measurement can't time the wrong build.
-	//
-	// Default: true
-	Fallback bool
 	// Only fetch what precedes the package builds, the module downloads and
 	// the helper tools, and return an empty file. For benchmarks, whose
 	// first build counts from a warm download like today's build has.
@@ -70,12 +65,8 @@ type GobuildBinaryOpts struct {
 }
 
 // Binary builds the main package pkg as "go build" would and returns the
-// binary, named output, without a Go build ID.
-//
-// A plan it can't replay per package (cgo, PGO, flags such as -race or
-// -toolexec) is built with one "go build" in base instead, as before, unless
-// fallback is off: the choice is made from the plan, before anything is
-// compiled.
+// binary, named output, without a Go build ID. A build it can't replay per
+// package yet (cgo, PGO, flags such as -race or -toolexec) is an error.
 func (r *Gobuild) Binary(base *Container, source *Directory, mountPath string, pkg string, output string, opts ...GobuildBinaryOpts) *File {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
@@ -100,10 +91,6 @@ func (r *Gobuild) Binary(base *Container, source *Directory, mountPath string, p
 		// `concurrency` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Concurrency) {
 			q = q.Arg("concurrency", opts[i].Concurrency)
-		}
-		// `fallback` optional argument
-		if !querybuilder.IsZeroValue(opts[i].Fallback) {
-			q = q.Arg("fallback", opts[i].Fallback)
 		}
 		// `prepare` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Prepare) {

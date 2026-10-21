@@ -53,37 +53,24 @@ type Go {
     """
     mountPath: String = null,
     """
-    Build binaries with one cached exec per package, so an edit rebuilds only
-    the packages it reaches. Experimental. Builds it can't do that way (a
-    custom base, cgo, flags such as -race) use one go build, as without it.
-    """
-    perPackage: Boolean! = false,
-    """
-    With perPackage, build with one go build when the per-package build
-    can't. Off, that's an error instead, so a measurement can't time the
-    wrong build.
-    """
-    perPackageFallback: Boolean! = true,
-    """
-    With perPackage, which packages separately cached calls build: "none",
-    "outside" (the standard library and dependency modules, as one tier) or
-    "split" (the standard library, then dependency modules).
+    For measuring: which packages of a binary's build separately cached calls
+    build: "none", "outside" (the standard library and dependency modules, as
+    one tier) or "split" (the standard library, then dependency modules).
     """
     perPackageTiers: String! = "outside",
     """
-    With perPackage, for benchmarks: fetch only what precedes the package
-    builds (module downloads and helper tools), and return empty binaries.
+    For benchmarks: fetch only what precedes the package builds (module
+    downloads and helper tools), and return empty binaries.
     """
     perPackagePrepare: Boolean! = false,
     """
-    With perPackage, for diagnosis: print a per-package timeline ("TL"
-    lines) in the build's output. It adds requests, so timed builds leave it
-    off.
+    For diagnosis: print a per-package timeline ("TL" lines) in the build's
+    output. It adds requests, so timed builds leave it off.
     """
     perPackageTimeline: Boolean! = false,
     """
-    With perPackage, for benchmarks: a value that makes package builds run
-    again instead of hitting the cache, keeping downloads and helper tools.
+    For benchmarks: a value that makes package builds run again instead of
+    hitting the cache, keeping downloads and helper tools.
     """
     perPackageSalt: String! = "",
   ) {
@@ -107,8 +94,6 @@ type Go {
       self.buildFlags = buildFlags
       self.goflags = goflags
       self.mountPath = mountPath
-      self.perPackage = perPackage
-      self.perPackageFallback = perPackageFallback
       self.perPackageTiers = perPackageTiers
       self.perPackagePrepare = perPackagePrepare
       self.perPackageTimeline = perPackageTimeline
@@ -158,33 +143,22 @@ type Go {
   mountPath: String
 
   """
-  Whether binaries are built with one cached exec per package.
-  """
-  perPackage: Boolean! = false
-
-  """
-  With perPackage, whether a build it can't do uses one go build instead of
-  failing.
-  """
-  perPackageFallback: Boolean! = true
-
-  """
-  With perPackage, which packages separately cached calls build.
+  Which packages of a binary's build separately cached calls build.
   """
   perPackageTiers: String! = "outside"
 
   """
-  With perPackage, whether builds only fetch what precedes the package builds.
+  Whether builds only fetch what precedes the package builds.
   """
   perPackagePrepare: Boolean! = false
 
   """
-  With perPackage, whether builds print a per-package timeline.
+  Whether builds print a per-package timeline.
   """
   perPackageTimeline: Boolean! = false
 
   """
-  With perPackage, a value that makes package builds run again.
+  A value that makes package builds run again.
   """
   perPackageSalt: String! = ""
 
@@ -300,8 +274,6 @@ type Go {
       buildFlags: buildFlags,
       goflags: goflags,
       mountPath: mount,
-      perPackage: perPackage,
-      perPackageFallback: perPackageFallback,
       perPackageTiers: perPackageTiers,
       perPackagePrepare: perPackagePrepare,
       perPackageTimeline: perPackageTimeline,
@@ -595,33 +567,22 @@ type GoModule {
   mountPath: String!
 
   """
-  Whether binaries are built with one cached exec per package.
-  """
-  let perPackage: Boolean!
-
-  """
-  With perPackage, whether a build it can't do uses one go build instead of
-  failing.
-  """
-  let perPackageFallback: Boolean!
-
-  """
-  With perPackage, which packages separately cached calls build.
+  Which packages of a binary's build separately cached calls build.
   """
   let perPackageTiers: String!
 
   """
-  With perPackage, whether builds only fetch what precedes the package builds.
+  Whether builds only fetch what precedes the package builds.
   """
   let perPackagePrepare: Boolean!
 
   """
-  With perPackage, whether builds print a per-package timeline.
+  Whether builds print a per-package timeline.
   """
   let perPackageTimeline: Boolean!
 
   """
-  With perPackage, a value that makes package builds run again.
+  A value that makes package builds run again.
   """
   let perPackageSalt: String!
 
@@ -1129,15 +1090,6 @@ type GoModule {
     if (pkg == ".") { "." } else { "./" + pkg }
   }
 
-  """
-  Build container with this module's source in place, working in the module,
-  targeting a GOOS/GOARCH platform. The container itself stays native: Go
-  cross-compiles, so nothing is emulated.
-  """
-  let buildEnv(ws: Workspace!, platform: String!): Container! {
-    platformBase(ws, platform).withDirectory(".", source(ws)).withWorkdir(path)
-  }
-
   # This module's Go container targeting a GOOS/GOARCH platform, before
   # source is added.
   let platformBase(ws: Workspace!, platform: String!): Container! {
@@ -1148,56 +1100,30 @@ type GoModule {
   }
 
   """
-  The binary for one main package, as go build names it.
+  The binary for one main package, as go build names it, built with one cached
+  exec per package, so an edit rebuilds only the packages it reaches.
   """
   let buildBinary(ws: Workspace!, platform: String!, pkg: String!, name: String!): File! {
-    let what = "Go binary " + packagePath(pkg) + " for " + platform
-    # A custom base may bring a C toolchain, and so cgo, which the
-    # per-package build doesn't do. The helper picks one go build itself for
-    # anything else it can't do, from the build's plan.
-    if (perPackage and baseImage != null and perPackageFallback == false) {
-      raise what + ": a custom base needs one go build, and perPackageFallback is off"
-    }
-    if (perPackage and baseImage == null) {
-      builtFile(
-        gobuild.binary(
-          base: platformBase(ws, platform),
-          image: gomod.goImage(toolchainVersion(ws)),
-          source: source(ws),
-          mountPath: mountPath,
-          workdir: path,
-          pkg: packageArg(pkg),
-          output: name,
-          flags: buildFlags,
-          fallback: perPackageFallback,
-          tiers: perPackageTiers,
-          prepare: perPackagePrepare,
-          timeline: perPackageTimeline,
-          salt: perPackageSalt,
-        ),
-        what,
-      )
-    } else {
-      built(
-        buildEnv(ws, platform).withExec(["go", "build"] + buildFlags + ["-o", "/out/" + name, packageArg(pkg)]),
-        what,
-      ).file("/out/" + name)
-    }
-  }
-
-  # A build container that has run, raising its failure under a name: the
-  # engine's own message is only the exit code.
-  let built(ctr: Container!, what: String!): Container! {
-    ctr.sync rescue {
-      err: Error => raise what + ": " + err.message
-    }
-    ctr
-  }
-
-  # A built file, raising its failure under a name, as built does.
-  let builtFile(file: File!, what: String!): File! {
+    let file = gobuild.binary(
+      base: platformBase(ws, platform),
+      # The toolchain image the base starts from, so package execs can run in
+      # it without the base's project-specific setup; a custom base is used
+      # as it is.
+      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      source: source(ws),
+      mountPath: mountPath,
+      workdir: path,
+      pkg: packageArg(pkg),
+      output: name,
+      flags: buildFlags,
+      tiers: perPackageTiers,
+      prepare: perPackagePrepare,
+      timeline: perPackageTimeline,
+      salt: perPackageSalt,
+    )
+    # The engine's own message is only the exit code: raise it under a name.
     file.sync rescue {
-      err: Error => raise what + ": " + err.message
+      err: Error => raise "Go binary " + packagePath(pkg) + " for " + platform + ": " + err.message
     }
     file
   }
@@ -1239,33 +1165,11 @@ type GoModule {
     buildBinary(ws, platform, rel, binaryFileName(ws, pkgPath, platform))
   }
 
-  # The binaries of the main packages among pkgPaths, from one go build.
+  # The binaries of the main packages among pkgPaths, one build each: they
+  # share the packages they have in common through the cache.
   let binaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {
-    if (perPackage and baseImage == null) {
-      # One per-package build each: they share the packages they have in
-      # common through the cache, not through one go build.
-      mainPackages(ws, pkgPaths).reduce(directory) { out, p =>
-        out.withFile(binaryFileName(ws, p, platform), binaryFile(ws, platform, p))
-      }
-    } else {
-      buildBinaries(ws, platform, mainPackages(ws, pkgPaths).map { p => relativeDir(p) })
-    }
-  }
-
-  """
-  The binaries for several main packages from one go build, each file named as
-  go build names it. The caller rules out two packages with the same name.
-  """
-  let buildBinaries(ws: Workspace!, platform: String!, pkgs: [String!]!): Directory! {
-    if (pkgs.length == 0) {
-      directory
-    } else {
-      built(
-        buildEnv(ws, platform).withExec(
-          ["go", "build"] + buildFlags + ["-o", "/out/"] + pkgs.map { pkg => packageArg(pkg) },
-        ),
-        "Go binaries in " + path + " for " + platform,
-      ).directory("/out")
+    mainPackages(ws, pkgPaths).reduce(directory) { out, p =>
+      out.withFile(binaryFileName(ws, p, platform), binaryFile(ws, platform, p))
     }
   }
 }
