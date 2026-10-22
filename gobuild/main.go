@@ -268,7 +268,12 @@ func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[str
 	if err != nil {
 		return nil, err
 	}
-	ctr := b.base.WithMountedFile("/gobuild/gohdr", hdrTool())
+	// The tier writes each package's archive under /work and links it into
+	// /work/lib, so /work is one scratch mount: the result read off it is
+	// just the archives, not the base's layers, and the links stay on one
+	// filesystem.
+	ctr := b.base.WithMountedFile("/gobuild/gohdr", hdrTool()).
+		WithMountedDirectory("/work", dag.Directory())
 	if mods {
 		ctr = ctr.WithMountedDirectory(b.roots.Mod, b.mods)
 	}
@@ -303,7 +308,8 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 		ctr = ctr.WithMountedDirectory(b.roots.Mod, fileTree(b.mods, bl.modFiles))
 	}
 	out := "/work/" + bl.name
-	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, nil, soloCompileC)}, noNest).
+	dir, err := ctr.WithMountedDirectory(out, dag.Directory()).
+		WithExec([]string{"sh", "-c", bl.script(blocks, nil, soloCompileC)}, noNest).
 		Directory(out).Sync(ctx)
 	if err != nil {
 		return nil, err

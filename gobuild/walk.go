@@ -156,9 +156,6 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			if n.Profile {
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
-			if n.Link && w.testmain != nil {
-				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", w.testmain)
-			}
 			if len(n.SrcFiles) > 0 {
 				srcDir, at := selected(w.src, n.SrcFiles)
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir)
@@ -166,6 +163,17 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			if len(n.ModFiles) > 0 {
 				ctr = ctr.WithMountedDirectory(w.roots.Mod, fileTree(w.mods, n.ModFiles))
 			}
+			// The package writes its outputs to a scratch mount at its work
+			// directory: the result read off it is just those, where one
+			// read from the exec's root filesystem would carry the base's
+			// layers to every engine that pulls it. A test binary's main
+			// package compiles the _testmain.go the go command wrote, so
+			// its mount starts with it.
+			scratch := dag.Directory()
+			if n.Link && w.testmain != nil {
+				scratch = scratch.WithFile("_testmain.go", w.testmain)
+			}
+			ctr = ctr.WithMountedDirectory("/work/"+n.Name, scratch)
 			// A script past the kernel's argument-size limit (the link's
 			// import config at a large project's scale) goes in as a file.
 			var ran *dagger.Container
