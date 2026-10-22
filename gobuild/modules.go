@@ -49,20 +49,9 @@ func (m *modules) dir(name string) *dagger.Directory {
 	if d, ok := m.dirs[name]; ok {
 		return d
 	}
-	at := strings.LastIndex(name, "@")
-	zipFile := path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip")
-	script := "set -e\n/gobuild/gohdr modunzip /gobuild/mod.zip " + shQuote(unescapeModule(name)) + " /gobuild/mod " + shQuote(m.sums[name])
-	// A Go toolchain, which the go command downloads as a module when the
-	// build asks for a newer Go, gets its commands made executable, as the
-	// go command does before it first runs a toolchain it downloaded.
-	if strings.HasPrefix(name, "golang.org/toolchain@") {
-		script += "\nfor d in /gobuild/mod/bin /gobuild/mod/pkg/tool; do [ ! -d \"$d\" ] || find \"$d\" -type f -exec chmod a+x {} +; done"
-	}
-	d := dag.Container().From(toolImage).
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedFile("/gobuild/mod.zip", m.all.File(zipFile)).
-		WithExec([]string{"sh", "-c", script}, noNest).
-		Directory("/gobuild/mod")
+	// Measurement only: the module straight from the build's own download,
+	// with no exec, as a core API that unpacks a file would give it.
+	d := m.all.Directory(name)
 	if m.dirs == nil {
 		m.dirs = map[string]*dagger.Directory{}
 	}
