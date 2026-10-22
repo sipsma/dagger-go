@@ -111,8 +111,14 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					return
 				}
 				depFiles = append(depFiles, dr.file)
+				// Measurement only: a compile's few archives each mounted
+				// read-only where the script names it; the link, which reads
+				// every archive, still reads them from one directory.
+				if !n.Link {
+					ctr = ctr.WithMountedFile("/work/lib/"+nodes[d].Name+".a", dr.file, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
+				}
 			}
-			if len(depFiles) > 0 {
+			if n.Link && len(depFiles) > 0 {
 				ctr = ctr.WithMountedDirectory("/work/lib", assemble(depFiles))
 			}
 			if n.Tools {
