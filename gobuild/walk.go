@@ -75,7 +75,7 @@ type profileOutput struct {
 }
 
 // packageConcurrency is how many package execs a walk runs at once.
-const packageConcurrency = 16
+const packageConcurrency = 32
 
 type result struct {
 	file *dagger.File
