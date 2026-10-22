@@ -111,8 +111,14 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					return
 				}
 				depFiles = append(depFiles, dr.file)
+				// A compile reads a few archives: each is mounted where the
+				// script names it, with no directory made to hold them. The
+				// link reads every archive, which one directory holds.
+				if !n.Link {
+					ctr = ctr.WithMountedFile("/work/lib/"+nodes[d].Name+".a", dr.file)
+				}
 			}
-			if len(depFiles) > 0 {
+			if n.Link && len(depFiles) > 0 {
 				ctr = ctr.WithMountedDirectory("/work/lib", assemble(depFiles))
 			}
 			if n.Tools {
