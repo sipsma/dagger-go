@@ -333,8 +333,9 @@ func (g *gate) acquire(height int64) int64 {
 	g.mu.Lock()
 	if g.free > 0 {
 		g.free--
+		granted := nowNS()
 		g.mu.Unlock()
-		return nowNS()
+		return granted
 	}
 	ready := make(chan struct{})
 	var granted int64

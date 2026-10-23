@@ -27,7 +27,8 @@ type modTrace struct {
 	Mod string
 	// Queued is when its prefetch was asked for; Started when the prefetch
 	// got one of fetch's slots; Done when the prefetch's request returned,
-	// 0 if it hadn't by the time the trace was written. A package's own
+	// 0 if that wasn't recorded when the trace was written (it may have
+	// returned just before). A package's own
 	// request can start the extraction before its prefetch does.
 	Queued, Started, Done int64
 }
