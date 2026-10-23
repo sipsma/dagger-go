@@ -33,6 +33,10 @@ type node struct {
 	Profile bool `json:"profile,omitempty"`
 	// Link is set for the main package, which links.
 	Link bool `json:"link,omitempty"`
+	// Argv and Files, when set, are Script as its one command and the files
+	// it writes first (directExec): the exec runs the command itself.
+	Argv  []string    `json:"argv,omitempty"`
+	Files []fileWrite `json:"-"`
 }
 
 // toNode renders a block for a walk. A package reads its dependencies'
@@ -47,6 +51,9 @@ func toNode(b *block, blocks map[string]*block, conc string) *node {
 		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
 	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
+	if files, argv, ok := directExec(n.Script, n.Name); ok {
+		n.Files, n.Argv = files, argv
+	}
 	return n
 }
 
@@ -135,7 +142,12 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// A script past the kernel's argument-size limit (the link's
 			// import config at a large project's scale) goes in as a file.
 			var ran *dagger.Container
-			if len(n.Script) > 64<<10 {
+			if n.Argv != nil {
+				for _, f := range n.Files {
+					ctr = ctr.WithNewFile(f.path, f.contents)
+				}
+				ran = ctr.WithExec(n.Argv, bare)
+			} else if len(n.Script) > 64<<10 {
 				ran = ctr.WithNewFile("/gobuild/run.sh", n.Script).WithExec([]string{"sh", "/gobuild/run.sh"}, bare)
 			} else {
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)

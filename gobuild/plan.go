@@ -902,3 +902,107 @@ func sourcePosition(src []byte, line, col int) (int, int, bool) {
 	}
 	return line, col, false
 }
+
+// fileWrite is a file a script writes before its command runs.
+type fileWrite struct {
+	path, contents string
+}
+
+// directExec is a package's script as its one command and the files the
+// command reads that the script writes first, when that's all the script
+// does: then the exec runs the command itself, with the files in place,
+// instead of a shell that starts a process to make its directory and then
+// the command. A script that changes directory, runs several commands, or
+// needs the shell for anything else isn't one.
+func directExec(script, name string) ([]fileWrite, []string, bool) {
+	var files []fileWrite
+	var argv []string
+	dir := "/work/" + name
+	for _, l := range strings.Split(strings.TrimSuffix(script, "\n"), "\n") {
+		switch {
+		case l == "" || l == "set -e" || strings.HasPrefix(l, "# "):
+			continue
+		case strings.HasPrefix(l, "mkdir -p "):
+			// Only the package's own directory, which a file written
+			// into it makes.
+			for _, d := range strings.Fields(strings.TrimPrefix(l, "mkdir -p ")) {
+				if strings.TrimSuffix(d, "/") != dir {
+					return nil, nil, false
+				}
+			}
+			continue
+		}
+		w := shellWords(l)
+		if n := len(w); n >= 2 && w[n-2] == "#" && w[n-1] == "internal" {
+			w = w[:n-2]
+		}
+		if f, ok := fileWriteOf(w); ok {
+			if path.Dir(f.path) != dir {
+				return nil, nil, false
+			}
+			files = append(files, f)
+			continue
+		}
+		if argv != nil || shellSyntax(l) || len(w) == 0 || reEnv.MatchString(w[0]) || w[0] == "cd" {
+			return nil, nil, false
+		}
+		argv = w
+	}
+	if argv == nil || len(files) == 0 {
+		return nil, nil, false
+	}
+	return files, argv, true
+}
+
+// fileWriteOf is what a script line that only writes a file writes: printf
+// '%s\n' with its lines, or echo with one line or, with -n, nothing,
+// redirected to the file.
+func fileWriteOf(w []string) (fileWrite, bool) {
+	n := len(w)
+	if n < 3 || w[n-2] != ">" {
+		return fileWrite{}, false
+	}
+	target, args := w[n-1], w[1:n-2]
+	switch {
+	case w[0] == "printf" && len(args) >= 1 && args[0] == `%s\n`:
+		var b strings.Builder
+		for _, a := range args[1:] {
+			b.WriteString(a + "\n")
+		}
+		return fileWrite{target, b.String()}, true
+	case w[0] == "echo" && len(args) == 1 && args[0] == "-n":
+		return fileWrite{target, ""}, true
+	case w[0] == "echo" && len(args) == 1 && !strings.Contains(args[0], "\\"):
+		// echo may read backslashes as escapes, depending on the shell.
+		return fileWrite{target, args[0] + "\n"}, true
+	}
+	return fileWrite{}, false
+}
+
+// shellSyntax reports whether a script line uses the shell for more than
+// splitting words: a character the shell reads specially outside single
+// quotes (and, inside double quotes, the ones it still reads there).
+func shellSyntax(l string) bool {
+	quote := byte(0)
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case quote == '"':
+			switch c {
+			case '"':
+				quote = 0
+			case '$', '`', '\\':
+				return true
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case strings.IndexByte("|&;<>$`(){}*?[]~\\#", c) >= 0:
+			return true
+		}
+	}
+	return quote != 0
+}

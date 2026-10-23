@@ -733,3 +733,52 @@ func TestParseSums(t *testing.T) {
 		}
 	}
 }
+
+// A package whose script only writes its import config and compiles runs
+// the compiler itself; one that changes directory or runs several commands
+// keeps its script.
+func TestDirectExec(t *testing.T) {
+	compile := "set -e\n# errors\nmkdir -p /work/p1 /work/p1/\n" +
+		"printf '%s\\n' '# import config' 'packagefile internal/abi=/work/lib/p2.a' > /work/p1/importcfg\n" +
+		"/usr/local/go/pkg/tool/linux_amd64/compile -c=4 -o /work/p1/p1.a -trimpath \"/work/p1=>\" -p errors -importcfg /work/p1/importcfg -pack /usr/local/go/src/errors/errors.go\n"
+	files, argv, ok := directExec(compile, "p1")
+	if !ok {
+		t.Fatal("a compile-only script isn't direct")
+	}
+	if len(files) != 1 || files[0].path != "/work/p1/importcfg" || files[0].contents != "# import config\npackagefile internal/abi=/work/lib/p2.a\n" {
+		t.Errorf("files: %+v", files)
+	}
+	if want := []string{"/usr/local/go/pkg/tool/linux_amd64/compile", "-c=4", "-o", "/work/p1/p1.a", "-trimpath", "/work/p1=>", "-p", "errors", "-importcfg", "/work/p1/importcfg", "-pack", "/usr/local/go/src/errors/errors.go"}; !slices.Equal(argv, want) {
+		t.Errorf("argv: %q", argv)
+	}
+	empty := "set -e\n# internal/goos\nmkdir -p /work/p3 /work/p3/\necho '# import config' > /work/p3/importcfg # internal\n/usr/local/go/pkg/tool/linux_amd64/compile -o /work/p3/p3.a -p internal/goos -importcfg /work/p3/importcfg -pack /usr/local/go/src/internal/goos/goos.go\n"
+	if files, _, ok := directExec(empty, "p3"); !ok || len(files) != 1 || files[0].contents != "# import config\n" {
+		t.Errorf("echo import config: %+v, %v", files, ok)
+	}
+	for name, script := range map[string]string{
+		"asm":       "set -e\n# p\nmkdir -p /work/p4 /work/p4/\necho -n > /work/p4/go_asm.h # internal\ncd /usr/local/go/src/p\n/usr/local/go/pkg/tool/linux_amd64/asm -o /work/p4/x.o ./x.s\n/usr/local/go/pkg/tool/linux_amd64/compile -o /work/p4/p4.a -pack x.go\n",
+		"link id":   "set -e\n# main\nmkdir -p /work/p5 /work/p5/\nprintf '%s\\n' 'packagefile main=/work/p5/p5.a' > /work/p5/importcfg.link\nid=$(/gobuild/gohdr linkid /work/p5/importcfg.link abc)\n/usr/local/go/pkg/tool/linux_amd64/link -o /work/p5/a.out -buildid=$id /work/p5/p5.a\n",
+		"elsewhere": "set -e\n# p\nmkdir -p /work/p6 /work/p6/exe\nprintf '%s\\n' 'x' > /work/p6/importcfg\n/usr/local/go/pkg/tool/linux_amd64/compile -o /work/p6/p6.a x.go\n",
+		"no file":   "set -e\n# p\nmkdir -p /work/p7 /work/p7/\n/usr/local/go/pkg/tool/linux_amd64/compile -o /work/p7/p7.a x.go\n",
+	} {
+		if _, _, ok := directExec(script, map[string]string{"asm": "p4", "link id": "p5", "elsewhere": "p6", "no file": "p7"}[name]); ok {
+			t.Errorf("%s: direct", name)
+		}
+	}
+}
+
+func TestShellSyntax(t *testing.T) {
+	for l, want := range map[string]bool{
+		`compile -trimpath "/work/p=>" -o /work/p/p.a`: false,
+		`compile -o '/work/p/a b.a'`:                   false,
+		`compile > out`:                                true,
+		`compile "$x"`:                                 true,
+		`a && b`:                                       true,
+		`compile *.go`:                                 true,
+		`compile 'unterminated`:                        true,
+	} {
+		if got := shellSyntax(l); got != want {
+			t.Errorf("shellSyntax(%q) = %v, want %v", l, got, want)
+		}
+	}
+}
