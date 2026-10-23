@@ -33,11 +33,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 func unpack(src, dst string) error {
@@ -117,7 +120,13 @@ type runSpec struct {
 // highest first: the spec's height is the heaviest chain of packages that
 // import the node, in this tier or a later one, weighed as weigh does. Each
 // output is linked into the lib directory, where dependents read it.
+//
+// Measurement build: it also writes traceFile, one JSON line per node with
+// when it became ready, started and ended (wall clock, Unix nanoseconds),
+// which node's end made it ready, and its script's CPU time, then a last
+// line for the whole run.
 func run(specPath string) error {
+	runStart := time.Now()
 	data, err := os.ReadFile(specPath)
 	if err != nil {
 		return err
@@ -147,12 +156,15 @@ func run(specPath string) error {
 		name string
 		out  []byte
 		err  error
+		tr   nodeTrace
 	}
 	results := make(chan result)
+	traces := map[string]*nodeTrace{}
 	var ready []string
 	for name := range nodes {
 		if pending[name] == 0 {
 			ready = append(ready, name)
+			traces[name] = &nodeTrace{Ready: runStart.UnixNano()}
 		}
 	}
 	jobs := runtime.NumCPU()
@@ -168,15 +180,21 @@ func run(specPath string) error {
 			n := nodes[ready[0]]
 			ready = ready[1:]
 			running++
+			traces[n.Name].Running = running
 			go func() {
-				out, err := runOne(n, spec.Lib)
-				results <- result{n.Name, out, err}
+				start := time.Now()
+				out, tr, err := runOne(n, spec.Lib)
+				tr.Start = start.UnixNano()
+				results <- result{n.Name, out, err, tr}
 			}()
 		}
 		r := <-results
 		running--
 		finished++
 		n := nodes[r.name]
+		t := traces[r.name]
+		t.Start, t.End, t.Linked = r.tr.Start, r.tr.End, r.tr.Linked
+		t.UserUS, t.SysUS, t.MaxRSSKB = r.tr.UserUS, r.tr.SysUS, r.tr.MaxRSSKB
 		if r.err != nil {
 			os.Stderr.Write(r.out)
 			return fmt.Errorf("%s: %v", n.Pkg, r.err)
@@ -184,10 +202,59 @@ func run(specPath string) error {
 		for _, up := range dependents[r.name] {
 			if pending[up]--; pending[up] == 0 {
 				ready = append(ready, up)
+				traces[up] = &nodeTrace{Ready: time.Now().UnixNano(), ReadyAfter: r.name}
 			}
 		}
 	}
-	return nil
+	return writeTrace(spec, traces, runStart, jobs)
+}
+
+// traceFile is where run writes its trace: outside the lib directory, which
+// dependents mount.
+const traceFile = "/work/gohdr-trace.jsonl"
+
+// nodeTrace is what run records for a node. Times are Unix nanoseconds.
+type nodeTrace struct {
+	Ready int64
+	// ReadyAfter is the in-tier dependency whose end made the node ready;
+	// empty when it was ready from the start.
+	ReadyAfter string
+	Start      int64
+	// End is when the script exited; Linked when its output was in lib.
+	End, Linked int64
+	// Running is how many scripts ran, this one included, when it started.
+	Running       int
+	UserUS, SysUS int64
+	MaxRSSKB      int64
+}
+
+var reConc = regexp.MustCompile("\\s-c=(\\d+)")
+
+func writeTrace(spec runSpec, traces map[string]*nodeTrace, runStart time.Time, jobs int) error {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	for _, n := range spec.Nodes {
+		t := traces[n.Name]
+		c := 0
+		if m := reConc.FindStringSubmatch(n.Script); m != nil {
+			c, _ = strconv.Atoi(m[1])
+		}
+		if err := enc.Encode(map[string]any{
+			"name": n.Name, "pkg": n.Pkg, "deps": n.Deps, "height": n.Height, "c": c,
+			"ready": t.Ready, "ready_after": t.ReadyAfter, "start": t.Start, "end": t.End,
+			"linked": t.Linked, "running": t.Running, "user_us": t.UserUS, "sys_us": t.SysUS,
+			"maxrss_kb": t.MaxRSSKB,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := enc.Encode(map[string]any{
+		"run": true, "start": runStart.UnixNano(), "end": time.Now().UnixNano(),
+		"jobs": jobs, "nodes": len(spec.Nodes),
+	}); err != nil {
+		return err
+	}
+	return os.WriteFile(traceFile, b.Bytes(), 0o644)
 }
 
 // weigh prints a line "<step> <weight>" for each step (bNNN) of a go build
@@ -248,28 +315,40 @@ func weigh(planPath string) error {
 	return w.Flush()
 }
 
-// runOne runs one node's script and links its output into lib.
-func runOne(n *runNode, lib string) ([]byte, error) {
+// runOne runs one node's script and links its output into lib. Its trace
+// has the script's end, the link's end and the script's CPU time.
+func runOne(n *runNode, lib string) ([]byte, nodeTrace, error) {
+	var tr nodeTrace
 	script := filepath.Join(os.TempDir(), n.Name+".sh")
 	if err := os.WriteFile(script, []byte(n.Script), 0o644); err != nil {
-		return nil, err
+		return nil, tr, err
 	}
-	out, err := exec.Command("sh", script).CombinedOutput()
+	cmd := exec.Command("sh", script)
+	out, err := cmd.CombinedOutput()
+	tr.End = time.Now().UnixNano()
+	if ps := cmd.ProcessState; ps != nil {
+		tr.UserUS = ps.UserTime().Microseconds()
+		tr.SysUS = ps.SystemTime().Microseconds()
+		if ru, ok := ps.SysUsage().(*syscall.Rusage); ok {
+			tr.MaxRSSKB = int64(ru.Maxrss)
+		}
+	}
 	if err != nil {
-		return out, err
+		return out, tr, err
 	}
 	src := filepath.Join("/work", n.Name, n.Output)
 	dst := filepath.Join(lib, n.Name+".a")
 	if err := os.Link(src, dst); err != nil {
 		data, err := os.ReadFile(src)
 		if err != nil {
-			return out, err
+			return out, tr, err
 		}
 		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return out, err
+			return out, tr, err
 		}
 	}
-	return out, nil
+	tr.Linked = time.Now().UnixNano()
+	return out, tr, nil
 }
 
 // probedFlags are the C compiler flags the go command adds only when a probe

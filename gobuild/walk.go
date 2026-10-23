@@ -95,9 +95,11 @@ const packageConcurrency = 16
 
 // tierResult is a tier's archives, once its exec is done.
 type tierResult struct {
-	dir  *dagger.Directory
-	err  error // set before done closes
-	done chan struct{}
+	dir *dagger.Directory
+	// trace is gohdr's trace of the tier (measurement build only).
+	trace *dagger.File
+	err   error // set before done closes
+	done  chan struct{}
 }
 
 type result struct {

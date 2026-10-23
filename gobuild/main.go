@@ -71,11 +71,11 @@ func (m *Gobuild) Binary(
 	// +optional
 	flags []string,
 ) (*dagger.Directory, error) {
-	blocks, linked, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, false)
+	blocks, linked, w, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, false)
 	if err != nil {
 		return nil, err
 	}
-	out := dag.Directory().WithFile(output, linked.file)
+	out := w.tierTraces(dag.Directory().WithFile(output, linked.file))
 	if blocks[linkID(blocks)].exportsHeader() {
 		// cgo writes the header only for a package that exports something,
 		// and go build installs it only if it was written.
@@ -120,7 +120,7 @@ func (m *Gobuild) TestBinary(
 	// +optional
 	flags []string,
 ) (*dagger.File, error) {
-	_, linked, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, true)
+	_, linked, _, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, true)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (m *Gobuild) TestBinary(
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, base *dagger.Container, image string, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+func run(ctx context.Context, base *dagger.Container, image string, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, *walker, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
@@ -138,15 +138,15 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 	}
 	b, err := newBuild(ctx, base, image, source, mountPath, cwd, flags)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	plan, weights, cc, err := b.plan(ctx, headers, flags, pkg, test)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	blocks, err := parsePlan(plan, b.roots)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
@@ -154,7 +154,7 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 	parts, names := heavyTiers(blocks, weights)
 	heights := heightsOf(blocks, outsideSet(blocks), weights)
 	if err := expandHeaders(ctx, b.mods, blocks); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
 	// runtime among the first: build the tool now, not when the runtime
@@ -165,7 +165,7 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 	w := &walker{base: b.base, tools: b.tools, src: source, mods: b.mods, roots: b.roots}
 	if test {
 		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
-			return nil, nil, fmt.Errorf("test main: %w", err)
+			return nil, nil, nil, fmt.Errorf("test main: %w", err)
 		}
 	}
 	// A PGO profile is preprocessed first: every compile reads it, in the
@@ -173,7 +173,7 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 	for _, bl := range blocks {
 		if bl.isProfile {
 			if w.profile, err = b.profileStep(ctx, bl, blocks); err != nil {
-				return nil, nil, fmt.Errorf("pgo profile: %w", err)
+				return nil, nil, nil, fmt.Errorf("pgo profile: %w", err)
 			}
 		}
 	}
@@ -217,7 +217,7 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 				}
 				lower[t] = lt.dir
 			}
-			r.dir, r.err = b.tier(ctx, blocks, part, other, lower, heights, w.profile)
+			r.dir, r.trace, r.err = b.tier(ctx, blocks, part, other, lower, heights, w.profile)
 			if r.err != nil {
 				r.err = fmt.Errorf("tier %s: %w", names[k], r.err)
 			}
@@ -231,9 +231,9 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 	}
 	results, err := w.walk(ctx, nodes)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return blocks, results[linkID(blocks)], nil
+	return blocks, results[linkID(blocks)], w, nil
 }
 
 // tier builds a tier's packages in one exec: gohdr runs their scripts in
@@ -243,7 +243,7 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 // tiers (other, by package) from lower, mounted at /work/t/<tier>. It returns
 // the tier's archives, each named <name>.a. heights orders its packages, as
 // heightsOf describes.
-func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[string]bool, other map[string]string, lower map[string]*dagger.Directory, heights map[string]int64, profile *profileOutput) (*dagger.Directory, error) {
+func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[string]bool, other map[string]string, lower map[string]*dagger.Directory, heights map[string]int64, profile *profileOutput) (*dagger.Directory, *dagger.File, error) {
 	type runNode struct {
 		Name, Pkg, Output, Script string
 		Deps                      []string
@@ -266,7 +266,7 @@ func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[str
 	sort.Slice(spec.Nodes, func(i, j int) bool { return spec.Nodes[i].Name < spec.Nodes[j].Name })
 	data, err := json.Marshal(spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ctr := b.base.WithMountedFile("/gobuild/gohdr", hdrTool())
 	if mods {
@@ -286,9 +286,35 @@ func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[str
 	for _, t := range lowerNames {
 		ctr = ctr.WithMountedDirectory("/work/t/"+t, lower[t], dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
-	return ctr.WithNewFile("/gobuild/tier.json", string(data)).
-		WithExec([]string{"/gobuild/gohdr", "run", "/gobuild/tier.json"}, noNest).
-		Directory("/work/lib").Sync(ctx)
+	ran := ctr.WithNewFile("/gobuild/tier.json", string(data)).
+		WithExec([]string{"/gobuild/gohdr", "run", "/gobuild/tier.json"}, noNest)
+	dir, err := ran.Directory("/work/lib").Sync(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Measurement build: gohdr's trace of the tier, read by tierTraces.
+	return dir, ran.File("/work/gohdr-trace.jsonl"), nil
+}
+
+// tierTraceDir is where Binary's output holds each tier's gohdr trace, as
+// <tier>.jsonl (measurement build only).
+const tierTraceDir = ".gobuild-tier-trace"
+
+// tierTraces adds each tier's gohdr trace to out, once the tiers are done.
+func (w *walker) tierTraces(out *dagger.Directory) *dagger.Directory {
+	names := make([]string, 0, len(w.tiers))
+	for name := range w.tiers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t := w.tiers[name]
+		<-t.done
+		if t.err == nil && t.trace != nil {
+			out = out.WithFile(path.Join(tierTraceDir, name+".jsonl"), t.trace)
+		}
+	}
+	return out
 }
 
 // profileStep runs the plan's PGO profile preprocessing, from the profile in
