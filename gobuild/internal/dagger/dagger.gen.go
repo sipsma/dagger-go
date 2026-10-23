@@ -436,6 +436,9 @@ type FileDigestOpts = core.FileDigestOpts
 // FileExportOpts contains options for File.Export
 type FileExportOpts = core.FileExportOpts
 
+// FileExtractOpts contains options for File.Extract
+type FileExtractOpts = core.FileExtractOpts
+
 // FileSearchOpts contains options for File.Search
 type FileSearchOpts = core.FileSearchOpts
 
