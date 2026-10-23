@@ -116,10 +116,13 @@ func (m *modules) fetch(ctx context.Context, blocks map[string]*block) {
 	}
 	sem := make(chan struct{}, 16)
 	for _, name := range names {
+		wtrace.mod(name, func(t *modTrace) { t.Queued = nowNS() })
 		go func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			wtrace.mod(name, func(t *modTrace) { t.Started = nowNS() })
 			m.dir(name).Sync(ctx)
+			wtrace.mod(name, func(t *modTrace) { t.Done = nowNS() })
 		}()
 	}
 }

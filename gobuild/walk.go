@@ -118,6 +118,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				}
 				depFiles = append(depFiles, dr.file)
 			}
+			wtrace.pkg(id, func(p *pkgTrace) {
+				p.Pkg, p.Name, p.Height, p.DepsDone = n.ImportPath, n.Name, w.heights[id], nowNS()
+			})
 			// A package's exec writes only its own directory. Its inputs are
 			// mounted read-only: a writable mount is one of the exec's
 			// outputs, a copy made for it to write and kept after.
@@ -154,18 +157,24 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
 			}
 			slots.acquire(w.heights[id])
-			defer slots.release()
+			wtrace.pkg(id, func(p *pkgTrace) { p.Acquired = nowNS() })
+			defer func() {
+				wtrace.pkg(id, func(p *pkgTrace) { p.Released = nowNS() })
+				slots.release()
+			}()
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
 			// its dependents' execs cached.
 			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
+			wtrace.pkg(id, func(p *pkgTrace) { p.DirSynced = nowNS() })
 			if err != nil {
 				r.err = err
 				return
 			}
 			r.dir = out
 			r.file, r.err = out.File(n.Output).Sync(ctx)
+			wtrace.pkg(id, func(p *pkgTrace) { p.FileSynced = nowNS() })
 		}()
 	}
 	wg.Wait()
