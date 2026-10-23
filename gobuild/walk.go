@@ -76,6 +76,8 @@ type walker struct {
 	mods  *dagger.Directory
 	roots roots
 	tiers map[string]*tierResult
+	// graph is the plan's package graph (measurement build only).
+	graph string
 	// profile is the preprocessed PGO profile, mounted for packages whose
 	// compile reads it; nil without one.
 	profile *profileOutput

@@ -163,6 +163,9 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 		go b.tools.Sync(ctx)
 	}
 	w := &walker{base: b.base, tools: b.tools, src: source, mods: b.mods, roots: b.roots}
+	if w.graph, err = planGraph(blocks, parts, names, heights, weights); err != nil {
+		return nil, nil, nil, err
+	}
 	if test {
 		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
 			return nil, nil, nil, fmt.Errorf("test main: %w", err)
@@ -300,8 +303,42 @@ func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[str
 // <tier>.jsonl (measurement build only).
 const tierTraceDir = ".gobuild-tier-trace"
 
-// tierTraces adds each tier's gohdr trace to out, once the tiers are done.
+// planGraph is the plan's package graph as JSON, one entry per step: its
+// name, import path, dependencies (by name), tier ("" for a package built in
+// its own exec), height, weight and whether it is the link (measurement build
+// only).
+func planGraph(blocks map[string]*block, parts []map[string]bool, names []string, heights, weights map[string]int64) (string, error) {
+	tierOf := map[string]string{}
+	for k, part := range parts {
+		for id := range part {
+			tierOf[id] = names[k]
+		}
+	}
+	type entry struct {
+		ID, Name, Pkg, Tier string
+		Deps                []string
+		Height, Weight      int64
+		Link, Cgo, Profile  bool
+	}
+	var entries []entry
+	for id, bl := range blocks {
+		e := entry{ID: id, Name: bl.name, Pkg: bl.importPath, Tier: tierOf[id], Height: heights[id],
+			Weight: weights[id], Link: bl.isLink, Cgo: bl.cgo, Profile: bl.isProfile}
+		for _, d := range bl.deps {
+			e.Deps = append(e.Deps, blocks[d].name)
+		}
+		sort.Strings(e.Deps)
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	data, err := json.Marshal(map[string]any{"tierC": tierCompileC, "soloC": soloCompileC, "steps": entries})
+	return string(data), err
+}
+
+// tierTraces adds each tier's gohdr trace and the plan's graph to out, once
+// the tiers are done.
 func (w *walker) tierTraces(out *dagger.Directory) *dagger.Directory {
+	out = out.WithNewFile(path.Join(tierTraceDir, "graph.json"), w.graph)
 	names := make([]string, 0, len(w.tiers))
 	for name := range w.tiers {
 		names = append(names, name)
