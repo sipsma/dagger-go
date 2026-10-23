@@ -180,11 +180,10 @@ func run(specPath string) error {
 			n := nodes[ready[0]]
 			ready = ready[1:]
 			running++
-			traces[n.Name].Running = running
+			traces[n.Name].Dispatched = time.Now().UnixNano()
+			traces[n.Name].Outstanding = running
 			go func() {
-				start := time.Now()
 				out, tr, err := runOne(n, spec.Lib)
-				tr.Start = start.UnixNano()
 				results <- result{n.Name, out, err, tr}
 			}()
 		}
@@ -216,21 +215,26 @@ const traceFile = "/work/gohdr-trace.jsonl"
 // nodeTrace is what run records for a node. Times are Unix nanoseconds.
 type nodeTrace struct {
 	Ready int64
-	// ReadyAfter is the in-tier dependency whose end made the node ready;
-	// empty when it was ready from the start.
+	// ReadyAfter is the in-tier dependency whose result made the node
+	// ready, as the scheduler received it (after its link into lib); empty
+	// when it was ready from the start.
 	ReadyAfter string
-	Start      int64
-	// End is when the script exited; Linked when its output was in lib.
-	End, Linked int64
-	// Running is how many scripts ran, this one included, when it started.
-	Running       int
+	// Dispatched is when the scheduler gave the node a slot; Outstanding is
+	// how many nodes held a slot then, this one included.
+	Dispatched  int64
+	Outstanding int
+	// Start is just before the script's command started, after its file
+	// was written; End is when the command's wait returned; Linked is when
+	// its output was in lib.
+	Start, End, Linked int64
+	// The script's CPU time, its waited-for children included, and the
+	// largest single process's peak RSS.
 	UserUS, SysUS int64
 	MaxRSSKB      int64
 }
 
-var reConc = regexp.MustCompile("\\s-c=(\\d+)")
-
 func writeTrace(spec runSpec, traces map[string]*nodeTrace, runStart time.Time, jobs int) error {
+	reConc := regexp.MustCompile("\\s-c=(\\d+)")
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	for _, n := range spec.Nodes {
@@ -242,7 +246,8 @@ func writeTrace(spec runSpec, traces map[string]*nodeTrace, runStart time.Time, 
 		if err := enc.Encode(map[string]any{
 			"name": n.Name, "pkg": n.Pkg, "deps": n.Deps, "height": n.Height, "c": c,
 			"ready": t.Ready, "ready_after": t.ReadyAfter, "start": t.Start, "end": t.End,
-			"linked": t.Linked, "running": t.Running, "user_us": t.UserUS, "sys_us": t.SysUS,
+			"linked": t.Linked, "dispatched": t.Dispatched, "outstanding": t.Outstanding,
+			"user_us": t.UserUS, "sys_us": t.SysUS,
 			"maxrss_kb": t.MaxRSSKB,
 		}); err != nil {
 			return err
@@ -324,6 +329,7 @@ func runOne(n *runNode, lib string) ([]byte, nodeTrace, error) {
 		return nil, tr, err
 	}
 	cmd := exec.Command("sh", script)
+	tr.Start = time.Now().UnixNano()
 	out, err := cmd.CombinedOutput()
 	tr.End = time.Now().UnixNano()
 	if ps := cmd.ProcessState; ps != nil {
