@@ -118,8 +118,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				}
 				depFiles = append(depFiles, dr.file)
 			}
+			depsDone := nowNS()
 			wtrace.pkg(id, func(p *pkgTrace) {
-				p.Pkg, p.Name, p.Height, p.DepsDone = n.ImportPath, n.Name, w.heights[id], nowNS()
+				p.Pkg, p.Name, p.Height, p.DepsDone = n.ImportPath, n.Name, w.heights[id], depsDone
 			})
 			// A package's exec writes only its own directory. Its inputs are
 			// mounted read-only: a writable mount is one of the exec's
@@ -156,25 +157,30 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			} else {
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
 			}
-			slots.acquire(w.heights[id])
-			wtrace.pkg(id, func(p *pkgTrace) { p.Acquired = nowNS() })
+			enqueued := nowNS()
+			granted := slots.acquire(w.heights[id])
+			acquired := nowNS()
+			wtrace.pkg(id, func(p *pkgTrace) { p.Enqueued, p.Granted, p.Acquired = enqueued, granted, acquired })
 			defer func() {
-				wtrace.pkg(id, func(p *pkgTrace) { p.Released = nowNS() })
+				released := nowNS()
 				slots.release()
+				wtrace.pkg(id, func(p *pkgTrace) { p.Released = released })
 			}()
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
 			// its dependents' execs cached.
 			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
-			wtrace.pkg(id, func(p *pkgTrace) { p.DirSynced = nowNS() })
+			dirSynced := nowNS()
+			wtrace.pkg(id, func(p *pkgTrace) { p.DirSynced = dirSynced })
 			if err != nil {
 				r.err = err
 				return
 			}
 			r.dir = out
 			r.file, r.err = out.File(n.Output).Sync(ctx)
-			wtrace.pkg(id, func(p *pkgTrace) { p.FileSynced = nowNS() })
+			fileSynced := nowNS()
+			wtrace.pkg(id, func(p *pkgTrace) { p.FileSynced = fileSynced })
 		}()
 	}
 	wg.Wait()
@@ -314,21 +320,28 @@ type gate struct {
 type gateWaiter struct {
 	height int64
 	ready  chan struct{}
+	// granted is when release handed this waiter the slot (measurement
+	// build only), set before ready closes.
+	granted *int64
 }
 
 func newGate(n int) *gate { return &gate{free: n} }
 
-func (g *gate) acquire(height int64) {
+// acquire returns when the slot was granted, Unix nanoseconds (measurement
+// build only).
+func (g *gate) acquire(height int64) int64 {
 	g.mu.Lock()
 	if g.free > 0 {
 		g.free--
 		g.mu.Unlock()
-		return
+		return nowNS()
 	}
 	ready := make(chan struct{})
-	g.waiting = append(g.waiting, gateWaiter{height, ready})
+	var granted int64
+	g.waiting = append(g.waiting, gateWaiter{height, ready, &granted})
 	g.mu.Unlock()
 	<-ready
+	return granted
 }
 
 func (g *gate) release() {
@@ -346,6 +359,7 @@ func (g *gate) release() {
 	}
 	w := g.waiting[best]
 	g.waiting = append(g.waiting[:best], g.waiting[best+1:]...)
+	*w.granted = nowNS()
 	close(w.ready)
 }
 

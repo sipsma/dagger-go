@@ -14,17 +14,21 @@ type pkgTrace struct {
 	Pkg    string
 	Name   string
 	Height int64
-	// DepsDone is when the last dependency's result arrived; Acquired when
-	// the package got an exec slot; DirSynced when its output directory's
-	// request returned; FileSynced when its archive's did; Released when it
-	// gave the slot back.
-	DepsDone, Acquired, DirSynced, FileSynced, Released int64
+	// DepsDone is when this package's goroutine saw its last dependency's
+	// result; Enqueued when it asked the gate for an exec slot, after
+	// building its (lazy) container; Granted when the gate handed it the
+	// slot; Acquired when acquire returned; DirSynced when its output
+	// directory's request returned; FileSynced when its archive's did;
+	// Released just before it gave the slot back.
+	DepsDone, Enqueued, Granted, Acquired, DirSynced, FileSynced, Released int64
 }
 
 type modTrace struct {
 	Mod string
-	// Queued is when its fetch was asked for; Started when it got one of
-	// fetch's slots; Done when its extraction's request returned.
+	// Queued is when its prefetch was asked for; Started when the prefetch
+	// got one of fetch's slots; Done when the prefetch's request returned,
+	// 0 if it hadn't by the time the trace was written. A package's own
+	// request can start the extraction before its prefetch does.
 	Queued, Started, Done int64
 }
 
@@ -63,6 +67,6 @@ func (t *walkTrace) mod(name string, f func(*modTrace)) {
 func (t *walkTrace) json() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	data, _ := json.Marshal(map[string]any{"slots": packageConcurrency, "pkgs": t.pkgs, "mods": t.mods})
+	data, _ := json.Marshal(map[string]any{"slots": packageConcurrency, "written": nowNS(), "pkgs": t.pkgs, "mods": t.mods})
 	return string(data)
 }
