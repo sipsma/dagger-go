@@ -733,3 +733,109 @@ func TestParseSums(t *testing.T) {
 		}
 	}
 }
+
+// A package whose script only writes its import config and compiles runs
+// the compiler itself; any other script, or one the shell would read
+// differently, keeps the shell.
+func TestDirectExec(t *testing.T) {
+	const (
+		head    = "set -e\n# errors\nmkdir -p /work/p1 /work/p1/\n"
+		cfg     = "printf '%s\\n' '# import config' 'packagefile internal/abi=/work/lib/p2.a' > /work/p1/importcfg\n"
+		compile = "/usr/local/go/pkg/tool/linux_amd64/compile -c=4 -o /work/p1/p1.a -trimpath \"/work/p1=>\" -p errors -importcfg /work/p1/importcfg -pack /usr/local/go/src/errors/errors.go\n"
+	)
+	files, argv, ok := directExec(head+cfg+compile, "p1")
+	if !ok {
+		t.Fatal("a compile-only script isn't direct")
+	}
+	if len(files) != 1 || files[0].path != "/work/p1/importcfg" || files[0].contents != "# import config\npackagefile internal/abi=/work/lib/p2.a\n" {
+		t.Errorf("files: %+v", files)
+	}
+	if want := []string{"/usr/local/go/pkg/tool/linux_amd64/compile", "-c=4", "-o", "/work/p1/p1.a", "-trimpath", "/work/p1=>", "-p", "errors", "-importcfg", "/work/p1/importcfg", "-pack", "/usr/local/go/src/errors/errors.go"}; !slices.Equal(argv, want) {
+		t.Errorf("argv: %q", argv)
+	}
+	quoted := "printf '%s\\n' '' 'it'\\''s $x' > /work/p1/embedcfg\n"
+	if files, _, ok := directExec(head+cfg+quoted+compile, "p1"); !ok || len(files) != 2 || files[1].contents != "\nit's $x\n" {
+		t.Errorf("quoted lines: %+v, %v", files, ok)
+	}
+	// A quoted # is an argument, as the shell reads it, not a comment.
+	if _, argv, ok := directExec(head+cfg+strings.TrimSuffix(compile, "\n")+" '#' internal\n", "p1"); !ok || !slices.Equal(argv[len(argv)-2:], []string{"#", "internal"}) {
+		t.Errorf("quoted #: %q, %v", argv, ok)
+	}
+	empty := head + "echo '# import config' > /work/p1/importcfg # internal\n" + compile
+	if files, _, ok := directExec(empty, "p1"); !ok || len(files) != 1 || files[0].contents != "# import config\n" {
+		t.Errorf("empty import config: %+v, %v", files, ok)
+	}
+	for name, script := range map[string]string{
+		"asm":                 head + "echo -n > /work/p1/go_asm.h # internal\n/usr/local/go/pkg/tool/linux_amd64/asm -o /work/p1/x.o /usr/local/go/src/p/x.s\n" + compile,
+		"cd":                  head + cfg + "cd /usr/local/go/src/errors\n" + compile,
+		"link":                head + "printf '%s\\n' 'packagefile main=/work/p1/p1.a' > /work/p1/importcfg.link\n/usr/local/go/pkg/tool/linux_amd64/link -o /work/p1/a.out /work/p1/p1.a\n",
+		"toolexec":            head + cfg + "/opt/wrap " + compile,
+		"assignment":          head + cfg + "GOROOT=/usr/local/go " + compile,
+		"exit":                head + cfg + "exit 0\n",
+		"negation":            head + cfg + "! " + compile,
+		"no file":             head + compile,
+		"other dir":           "set -e\n# p\nmkdir -p /work/p1 /work/p1/exe\n" + cfg + compile,
+		"no mkdir":            "set -e\n# p\n" + cfg + compile,
+		"empty mkdir":         "set -e\n# p\nmkdir -p\n" + cfg + compile,
+		"write after":         head + cfg + compile + cfg,
+		"two commands":        head + cfg + compile + compile,
+		"expansion":           head + cfg + strings.Replace(compile, "-c=4", "-c=$n", 1),
+		"quoted expansion":    head + cfg + strings.Replace(compile, `"/work/p1=>"`, `"$PWD=>"`, 1),
+		"glob":                head + cfg + strings.Replace(compile, "errors.go", "*.go", 1),
+		"comment":             head + cfg + strings.TrimSuffix(compile, "\n") + " # x\n",
+		"backslash":           head + cfg + strings.Replace(compile, `"/work/p1=>"`, `"a\qb"`, 1),
+		"unterminated":        head + cfg + strings.TrimSuffix(compile, "\n") + " 'x\n",
+		"semicolon":           head + cfg + strings.TrimSuffix(compile, "\n") + "; true\n",
+		"double space":        head + cfg + strings.Replace(compile, " -o ", "  -o ", 1),
+		"printf expansion":    head + "printf '%s\\n' \"$HOME\" > /work/p1/importcfg\n" + compile,
+		"printf substitution": head + "printf '%s\\n' '$(id)'; /bin/false > /work/p1/importcfg\n" + compile,
+		"printf glob":         head + "printf '%s\\n' *.go > /work/p1/importcfg\n" + compile,
+		"printf no lines":     head + "printf '%s\\n' > /work/p1/importcfg\n" + compile,
+		"printf bare":         head + "printf '%s\\n' x > /work/p1/importcfg\n" + compile,
+		"quoted target":       head + "printf '%s\\n' 'x' > '/work/p1/importcfg\n" + compile,
+		"quoted redirect":     head + "printf '%s\\n' 'x' '>' /work/p1/importcfg\n" + compile,
+		"echo":                head + "echo 'x' > /work/p1/importcfg\n" + compile,
+		"echo -e":             head + "echo -e > /work/p1/importcfg\n" + compile,
+	} {
+		if _, _, ok := directExec(script, "p1"); ok {
+			t.Errorf("%s: direct", name)
+		}
+	}
+}
+
+func TestRootUser(t *testing.T) {
+	for u, want := range map[string]bool{"": true, "root": true, "0": true, "0:0": true, "root:root": true, "1000": false, "root:1000": false, "nobody:0": false} {
+		if got := rootUser(u); got != want {
+			t.Errorf("rootUser(%q) = %v", u, got)
+		}
+	}
+}
+
+// A compile whose one file is its import config reads it from standard input
+// and writes its archive into /work/lib; any other use of its directory
+// keeps it as it was.
+func TestStdinExec(t *testing.T) {
+	cfg := []fileWrite{{"/work/p1/importcfg", "# import config\n"}}
+	argv := []string{"/usr/local/go/pkg/tool/linux_amd64/compile", "-c=4", "-o", "/work/p1/p1.a", "-trimpath", "/work/p1=>", "-p", "errors", "-importcfg", "/work/p1/importcfg", "-pack", "/usr/local/go/src/errors/errors.go"}
+	stdin, got, ok := stdinExec(cfg, argv, "p1")
+	want := []string{"/usr/local/go/pkg/tool/linux_amd64/compile", "-c=4", "-o", "/work/lib/p1.a", "-trimpath", "/work/p1=>", "-p", "errors", "-importcfg", "/dev/stdin", "-pack", "/usr/local/go/src/errors/errors.go"}
+	if !ok || stdin != "# import config\n" || !slices.Equal(got, want) {
+		t.Fatalf("stdinExec: %q, %q, %v", stdin, got, ok)
+	}
+	with := func(f func([]string) []string) []string { return f(slices.Clone(argv)) }
+	for name, c := range map[string]struct {
+		files []fileWrite
+		argv  []string
+	}{
+		"embedcfg":              {append(slices.Clone(cfg), fileWrite{"/work/p1/embedcfg", "{}\n"}), with(func(a []string) []string { return append(a, "-embedcfg", "/work/p1/embedcfg") })},
+		"other file":            {[]fileWrite{{"/work/p1/other", "x\n"}}, argv},
+		"no import config flag": {cfg, with(func(a []string) []string { return slices.Delete(a, 8, 10) })},
+		"other output":          {cfg, with(func(a []string) []string { a[3] = "/work/p1/other.a"; return a })},
+		"other use":             {cfg, with(func(a []string) []string { return append(a, "/work/p1/gen.go") })},
+		"other trimpath":        {cfg, with(func(a []string) []string { a[5] = "/work/p1/x=>"; return a })},
+	} {
+		if _, _, ok := stdinExec(c.files, c.argv, "p1"); ok {
+			t.Errorf("%s: taken", name)
+		}
+	}
+}

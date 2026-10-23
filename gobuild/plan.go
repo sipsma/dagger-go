@@ -908,3 +908,196 @@ func sourcePosition(src []byte, line, col int) (int, int, bool) {
 	}
 	return line, col, false
 }
+
+// fileWrite is a file a script writes before its command runs.
+type fileWrite struct {
+	path, contents string
+}
+
+// directExec is a package's script as its one command and the files the
+// command reads that the script writes first, when that's all the script
+// does: then the exec runs the command itself, with the files in place,
+// instead of a shell that starts a process to make its directory and then
+// the command. Only the forms script renders and the go command prints for
+// a compile are taken, each checked to read back exactly as written, so the
+// shell would run the same command on the same files: the header, one
+// mkdir of the package's directory, its import config and similar files
+// written by printf (or the go command's echo of an empty one), and the Go
+// compiler itself. Anything else (asm, cgo, a
+// -toolexec wrapper, a change of directory, more commands) runs in the
+// shell. The compiler reads $PWD, which the shell sets, only through
+// os.Getwd, which takes it only when it names the directory it runs in.
+func directExec(script, name string) ([]fileWrite, []string, bool) {
+	var files []fileWrite
+	var argv []string
+	dir := "/work/" + name
+	made := false
+	for _, l := range strings.Split(strings.TrimSuffix(script, "\n"), "\n") {
+		switch {
+		case l == "" || l == "set -e" || strings.HasPrefix(l, "#"):
+			continue
+		case argv != nil:
+			return nil, nil, false
+		case !made:
+			// The package's own directory, first; a file written into it
+			// makes it.
+			ds := strings.Split(l, " ")
+			if len(ds) < 3 || ds[0] != "mkdir" || ds[1] != "-p" {
+				return nil, nil, false
+			}
+			for _, d := range ds[2:] {
+				if d != dir && d != dir+"/" {
+					return nil, nil, false
+				}
+			}
+			made = true
+		default:
+			if f, ok := printfWrite(l, dir); ok {
+				files = append(files, f)
+				continue
+			}
+			// The go command's import config for a package that imports
+			// nothing, word for word.
+			if l == "echo '# import config' > "+dir+"/importcfg # internal" {
+				files = append(files, fileWrite{dir + "/importcfg", "# import config\n"})
+				continue
+			}
+			w, ok := plainWords(l)
+			if !ok || !isCompiler(w[0]) {
+				return nil, nil, false
+			}
+			argv = w
+		}
+	}
+	if argv == nil || len(files) == 0 {
+		return nil, nil, false
+	}
+	return files, argv, true
+}
+
+// stdinExec is a direct exec's command (directExec) reworked so that it
+// needs no file of its own, when its one file is its import config: the
+// compiler reads that from standard input, which the exec is given, and
+// writes its archive into /work/lib, which holds its dependencies' archives
+// and nothing named like it, instead of into a directory of its own, which
+// would have to be made first. Any other use of the package's directory
+// keeps the command as it is.
+func stdinExec(files []fileWrite, argv []string, name string) (string, []string, bool) {
+	dir := "/work/" + name
+	cfg := dir + "/importcfg"
+	if len(files) != 1 || files[0].path != cfg {
+		return "", nil, false
+	}
+	out := make([]string, len(argv))
+	read, wrote := false, false
+	for i, a := range argv {
+		switch {
+		case i > 0 && argv[i-1] == "-importcfg" && a == cfg:
+			out[i], read = "/dev/stdin", true
+		case i > 0 && argv[i-1] == "-o" && a == dir+"/"+name+".a":
+			out[i], wrote = "/work/lib/"+name+".a", true
+		case a == "-trimpath" || (i > 0 && argv[i-1] == "-trimpath" && a == dir+"=>"):
+			// Rewrites paths under the package's directory, where none of
+			// its inputs are.
+			out[i] = a
+		case strings.Contains(a, dir):
+			return "", nil, false
+		default:
+			out[i] = a
+		}
+	}
+	if !read || !wrote {
+		return "", nil, false
+	}
+	return files[0].contents, out, true
+}
+
+// printfWrite is the file a script line writes when the line is exactly
+// script's rendering of a heredoc: printf '%s\n' with each of the file's
+// lines quoted by shQuote, redirected to a file in dir by a plain name.
+func printfWrite(l, dir string) (fileWrite, bool) {
+	const prefix = `printf '%s\n' `
+	i := strings.LastIndex(l, " > ")
+	if !strings.HasPrefix(l, prefix) || i < len(prefix) {
+		return fileWrite{}, false
+	}
+	target := l[i+len(" > "):]
+	if path.Dir(target) != dir || !rePlainName.MatchString(path.Base(target)) {
+		return fileWrite{}, false
+	}
+	args := shellWords(l[len(prefix):i])
+	quoted := make([]string, len(args))
+	var b strings.Builder
+	for j, a := range args {
+		quoted[j] = shQuote(a)
+		b.WriteString(a + "\n")
+	}
+	if len(args) == 0 || strings.Join(quoted, " ") != l[len(prefix):i] {
+		return fileWrite{}, false
+	}
+	return fileWrite{target, b.String()}, true
+}
+
+// rePlainName is a file name the shell reads as itself.
+var rePlainName = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// rePlainRun is a run of characters the shell reads as themselves outside
+// quotes.
+var rePlainRun = regexp.MustCompile(`^[A-Za-z0-9_./=:,+@%^-]+`)
+
+// plainWords splits a command line into its words when the shell would
+// only split it: words separated by single spaces, each made of plain
+// characters, single-quoted text and double-quoted text with nothing the
+// shell expands in it. It reports false for anything else.
+func plainWords(l string) ([]string, bool) {
+	var words []string
+	for _, field := range strings.Split(l, " ") {
+		if field == "" {
+			return nil, false
+		}
+		var w strings.Builder
+		for field != "" {
+			switch field[0] {
+			case '\'', '"':
+				end := strings.IndexByte(field[1:], field[0])
+				if end < 0 {
+					return nil, false
+				}
+				text := field[1 : 1+end]
+				if field[0] == '"' && strings.ContainsAny(text, "$`\\!") {
+					return nil, false
+				}
+				w.WriteString(text)
+				field = field[2+end:]
+			default:
+				run := rePlainRun.FindString(field)
+				if run == "" {
+					return nil, false
+				}
+				w.WriteString(run)
+				field = field[len(run):]
+			}
+		}
+		words = append(words, w.String())
+	}
+	return words, len(words) > 0
+}
+
+// isCompiler reports whether a command is the Go compiler, as the go
+// command runs it: GOROOT/pkg/tool/GOOS_GOARCH/compile.
+func isCompiler(cmd string) bool {
+	tool := path.Dir(cmd)
+	return path.IsAbs(cmd) && path.Base(cmd) == "compile" &&
+		reToolDir.MatchString(path.Base(tool)) && path.Base(path.Dir(tool)) == "tool" &&
+		path.Base(path.Dir(path.Dir(tool))) == "pkg"
+}
+
+// reToolDir is the go command's tool directory name, GOOS_GOARCH.
+var reToolDir = regexp.MustCompile(`^[a-z0-9]+_[a-z0-9]+$`)
+
+// rootUser reports whether a container's user is root, user and group:
+// files the exec is given are then the same as ones a shell in it writes.
+func rootUser(u string) bool {
+	user, group, _ := strings.Cut(u, ":")
+	return (user == "" || user == "root" || user == "0") && (group == "" || group == "root" || group == "0")
+}

@@ -36,6 +36,11 @@ type node struct {
 	Profile bool `json:"profile,omitempty"`
 	// Link is set for the main package, which links.
 	Link bool `json:"link,omitempty"`
+	// Argv and Stdin, when set, are Script as its one command and the
+	// import config it reads from standard input (stdinExec): the exec runs
+	// the command itself, and the archive is written into /work/lib.
+	Argv  []string `json:"argv,omitempty"`
+	Stdin string   `json:"-"`
 }
 
 // toNode renders a block for a walk. A package reads its dependencies'
@@ -50,6 +55,11 @@ func toNode(b *block, blocks map[string]*block, conc string) *node {
 		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
 	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
+	if files, argv, ok := directExec(n.Script, n.Name); ok {
+		if stdin, argv, ok := stdinExec(files, argv, n.Name); ok {
+			n.Stdin, n.Argv = stdin, argv
+		}
+	}
 	return n
 }
 
@@ -61,6 +71,10 @@ type walker struct {
 	// nonGo is the source's files that aren't Go, which a package with C or
 	// assembly there reads (srcNonGo); nil when no package does.
 	nonGo *dagger.Directory
+	// direct is whether packages whose script is only a compile run the
+	// compiler without a shell (directExec): only when the base runs as
+	// root, which can write the output where the exec puts it.
+	direct bool
 	// mods is the module cache's modules, each on its own.
 	mods  *modules
 	roots roots
@@ -145,7 +159,16 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// A script past the kernel's argument-size limit (the link's
 			// import config at a large project's scale) goes in as a file.
 			var ran *dagger.Container
-			if len(n.Script) > 64<<10 {
+			outDir := "/work/" + n.Name
+			if n.Argv != nil && w.direct {
+				if len(depFiles) == 0 {
+					ctr = ctr.WithMountedDirectory("/work/lib", dag.Directory())
+				}
+				opts := bare
+				opts.Stdin = n.Stdin
+				ran = ctr.WithExec(n.Argv, opts)
+				outDir = "/work/lib"
+			} else if len(n.Script) > 64<<10 {
 				ran = ctr.WithNewFile("/gobuild/run.sh", n.Script).WithExec([]string{"sh", "/gobuild/run.sh"}, bare)
 			} else {
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
@@ -156,7 +179,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
 			// its dependents' execs cached.
-			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
+			out, err := ran.Directory(outDir).Sync(ctx)
 			if err != nil {
 				r.err = err
 				return

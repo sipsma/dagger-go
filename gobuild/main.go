@@ -192,7 +192,11 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if needsTools(blocks) {
 		go b.tools.Sync(ctx)
 	}
-	w := &walker{base: b.base, tools: b.tools, src: source, mods: mods, roots: b.roots, nonGo: nonGo}
+	user, err := b.base.User(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("base user: %w", err)
+	}
+	w := &walker{base: b.base, tools: b.tools, src: source, mods: mods, roots: b.roots, nonGo: nonGo, direct: rootUser(user)}
 	if test {
 		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
 			return nil, nil, fmt.Errorf("test main: %w", err)
