@@ -635,7 +635,7 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		}
 		body.WriteString(l + "\n")
 	}
-	return "set -e\n# " + b.importPath + "\nmkdir -p " + strings.Join(dirs, " ") + "\n" + body.String()
+	return "set -e\n# " + b.importPath + "\nrenice -n 10 -p $$ >/dev/null 2>&1 || :\nmkdir -p " + strings.Join(dirs, " ") + "\n" + body.String()
 }
 
 // isCd reports whether a plan line changes directory: the go command's own
