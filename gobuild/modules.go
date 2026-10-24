@@ -118,13 +118,19 @@ func (m *modules) fetch(ctx context.Context, blocks map[string]*block, heights m
 	names := byHeight(need)
 	queue := make(chan string, len(names))
 	for _, name := range names {
+		queued := nowNS()
+		wtrace.mod(name, func(t *modTrace) { t.Queued = queued })
 		queue <- name
 	}
 	close(queue)
 	for range min(16, len(names)) {
 		go func() {
 			for name := range queue {
+				started := nowNS()
+				wtrace.mod(name, func(t *modTrace) { t.Started = started })
 				m.dir(name).Sync(ctx)
+				done := nowNS()
+				wtrace.mod(name, func(t *modTrace) { t.Done = done })
 			}
 		}()
 	}
