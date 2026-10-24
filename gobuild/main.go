@@ -78,7 +78,8 @@ func (m *Gobuild) Binary(
 	if err != nil {
 		return nil, err
 	}
-	out := dag.Directory().WithFile(output, linked.file)
+	out := dag.Directory().WithFile(output, linked.file).
+		WithNewFile(".gobuild-tier-trace/walk.json", wtrace.json())
 	if blocks[linkID(blocks)].exportsHeader() {
 		// cgo writes the header only for a package that exports something,
 		// and go build installs it only if it was written.
