@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path"
 	"sort"
@@ -153,13 +154,30 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			} else {
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
 			}
+			// The request is made before the slot: its calls are set up
+			// while the package waits, so the slot holds only the work.
+			pre, err := ran.Directory("/work/" + n.Name).ID(ctx)
+			if err != nil {
+				r.err = err
+				return
+			}
 			slots.acquire(w.heights[id])
 			defer slots.release()
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
 			// its dependents' execs cached.
-			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
+			idJSON, err := json.Marshal(pre)
+			if err != nil {
+				r.err = err
+				return
+			}
+			var made dagger.Directory
+			if err := made.UnmarshalJSON(idJSON); err != nil {
+				r.err = err
+				return
+			}
+			out, err := made.Sync(ctx)
 			if err != nil {
 				r.err = err
 				return
