@@ -887,6 +887,18 @@ type GoDev {
       base.directory("/go/pkg/mod/example.com/cached@v1.0.0").file("cached.go").contents.contains("Answer"),
       "the base's module cache lost the dependency",
     )
+
+    # The same cache reached through a symlink into a directory mounted
+    # elsewhere, which the root filesystem alone doesn't show.
+    let behindMount = container
+      .from("golang:1.25-alpine")
+      .withMountedDirectory("/filled", made.directory("/go/pkg/mod"))
+      .withExec(["sh", "-c", "mkdir -p /go/pkg && rm -rf /go/pkg/mod && ln -s /filled /go/pkg/mod"])
+      .withEnvVariable("GOPROXY", "off")
+      .withEnvVariable("GOSUMDB", "off")
+    let builtBehindMount = go(base: behindMount).packages(ws).get(key: ".").binary(ws)
+    let outBehindMount = behindMount.withFile("/usr/local/bin/offline", builtBehindMount).withExec(["offline"]).stdout
+    assert(outBehindMount == "42\n", "the binary built from a module cache behind a symlink into a mount printed: " + outBehindMount)
     null
   }
 

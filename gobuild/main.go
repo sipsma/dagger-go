@@ -513,22 +513,27 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	// The download goes to one path whatever GOMODCACHE the base has, as a
 	// file read from the module cache is keyed by its path in it too: then
 	// a module's download is the same input in every project. A module
-	// cache the base comes with, filled for offline builds, is its start:
-	// mounted at that path rather than copied there, since it can be
-	// hundreds of megabytes the download then reads in place.
+	// cache the base comes with, filled for offline builds, is its start.
+	// When it is a directory of the root filesystem, the engine copies it
+	// there, linking its files rather than writing them again: it can be
+	// hundreds of megabytes. Otherwise, such as behind a symlink into a
+	// mount the root filesystem doesn't show, the script copies it.
 	downloader := base.
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd)
+	start := ""
 	if path.Clean(gomodcache) != modCacheDir {
-		filled, err := base.Exists(ctx, gomodcache, dagger.ContainerExistsOpts{ExpectedType: dagger.ExistsTypeDirectoryType})
+		filled, err := base.Exists(ctx, gomodcache, dagger.ContainerExistsOpts{ExpectedType: dagger.ExistsTypeDirectoryType, DoNotFollowSymlinks: true})
 		if err != nil {
 			return nil, fmt.Errorf("GOMODCACHE %s: %w", gomodcache, err)
 		}
 		if filled {
-			downloader = downloader.WithMountedDirectory(modCacheDir, base.Directory(gomodcache))
+			downloader = downloader.WithDirectory(modCacheDir, base.Directory(gomodcache))
+		} else {
+			start = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
 		}
 	}
-	script := "set -e\nmkdir -p " + modCacheDir +
+	script := "set -e\nmkdir -p " + modCacheDir + start +
 		"\nexport GOMODCACHE=" + modCacheDir + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
 if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 1)" ]; then
 	work=$(go env GOWORK)
