@@ -854,6 +854,43 @@ type GoDev {
   }
 
   """
+  A base that comes with its module cache filled, for offline builds, at
+  the GOMODCACHE it names: the per-package build reads its dependency from
+  that cache with no proxy at all, and the binary runs. The base's own cache
+  is left as it was.
+  """
+  filledModCacheCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/cached\n\ngo 1.25\n")
+      .withNewFile("cached.go", "package cached\n\nconst Answer = 42\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/offline\n\ngo 1.25\n\nrequire example.com/cached v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/cached\"\n)\n\nfunc main() { fmt.Println(cached.Answer) }\n")
+    # The module is downloaded once from a file proxy into the module cache,
+    # and go.sum written from it; the base keeps only the filled cache.
+    let made = container
+      .from("golang:1.25-alpine")
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/cached@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/cached/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/cached@v1.0.0; cp example.com/cached@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOPROXY=file:///proxy GOSUMDB=off go mod tidy && GOPROXY=file:///proxy GOSUMDB=off go mod download"])
+    let base = container
+      .from("golang:1.25-alpine")
+      .withDirectory("/go/pkg/mod", made.directory("/go/pkg/mod"))
+      .withEnvVariable("GOPROXY", "off")
+      .withEnvVariable("GOSUMDB", "off")
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/offline", built).withExec(["offline"]).stdout
+    assert(out == "42\n", "the binary built from the base's module cache printed: " + out)
+    assert(
+      base.directory("/go/pkg/mod/example.com/cached@v1.0.0").file("cached.go").contents.contains("Answer"),
+      "the base's module cache lost the dependency",
+    )
+    null
+  }
+
+  """
   A cgo or assembly package in the source #includes files from elsewhere in
   it, which no plan line names: outside its module, of names no pattern
   covers, that the caller adds with includeExtraFiles, and in directories

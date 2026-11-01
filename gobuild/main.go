@@ -513,12 +513,22 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	// The download goes to one path whatever GOMODCACHE the base has, as a
 	// file read from the module cache is keyed by its path in it too: then
 	// a module's download is the same input in every project. A module
-	// cache the base comes with, filled for offline builds, is its start.
-	start := ""
+	// cache the base comes with, filled for offline builds, is its start:
+	// mounted at that path rather than copied there, since it can be
+	// hundreds of megabytes the download then reads in place.
+	downloader := base.
+		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
+		WithWorkdir(cwd)
 	if path.Clean(gomodcache) != modCacheDir {
-		start = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
+		filled, err := base.Exists(ctx, gomodcache, dagger.ContainerExistsOpts{ExpectedType: dagger.ExistsTypeDirectoryType})
+		if err != nil {
+			return nil, fmt.Errorf("GOMODCACHE %s: %w", gomodcache, err)
+		}
+		if filled {
+			downloader = downloader.WithMountedDirectory(modCacheDir, base.Directory(gomodcache))
+		}
 	}
-	script := "set -e\nmkdir -p " + modCacheDir + start +
+	script := "set -e\nmkdir -p " + modCacheDir +
 		"\nexport GOMODCACHE=" + modCacheDir + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
 if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 1)" ]; then
 	work=$(go env GOWORK)
@@ -535,9 +545,7 @@ if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 
 	fi
 fi
 [ "$mode" = vendor ] || ` + strings.Join(quoted, " ")
-	b.mods, err = base.
-		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
-		WithWorkdir(cwd).
+	b.mods, err = downloader.
 		WithExec([]string{"sh", "-c", script}, bare).
 		Directory(modCacheDir).Sync(ctx)
 	if err != nil {
