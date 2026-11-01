@@ -516,16 +516,20 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	// cache the base comes with, filled for offline builds, is its start.
 	// When it is a directory of the root filesystem, the engine copies it
 	// there, linking its files rather than writing them again: it can be
-	// hundreds of megabytes. Otherwise, such as behind a symlink into a
-	// mount the root filesystem doesn't show, the script copies it.
+	// hundreds of megabytes. Otherwise, such as in a mount the base keeps or
+	// behind a symlink into one, which the root filesystem doesn't show, the
+	// script copies it.
 	downloader := base.
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd)
 	start := ""
 	if path.Clean(gomodcache) != modCacheDir {
-		filled, err := base.Exists(ctx, gomodcache, dagger.ContainerExistsOpts{ExpectedType: dagger.ExistsTypeDirectoryType, DoNotFollowSymlinks: true})
-		if err != nil {
-			return nil, fmt.Errorf("GOMODCACHE %s: %w", gomodcache, err)
+		filled := false
+		if !underMount(gomodcache, mounts, caches) {
+			filled, err = base.Exists(ctx, gomodcache, dagger.ContainerExistsOpts{ExpectedType: dagger.ExistsTypeDirectoryType, DoNotFollowSymlinks: true})
+			if err != nil {
+				return nil, fmt.Errorf("GOMODCACHE %s: %w", gomodcache, err)
+			}
 		}
 		if filled {
 			downloader = downloader.WithDirectory(modCacheDir, base.Directory(gomodcache))
@@ -565,6 +569,22 @@ fi
 		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, bare).
 		Directory(toolsDir)
 	return b, nil
+}
+
+// underMount reports whether dir is at or beneath one of mounts the build
+// keeps, those that aren't the Go caches' it drops.
+func underMount(dir string, mounts []string, caches map[string]bool) bool {
+	dir = path.Clean(dir)
+	for _, m := range mounts {
+		if caches[m] {
+			continue
+		}
+		m = path.Clean(m)
+		if dir == m || strings.HasPrefix(dir, strings.TrimSuffix(m, "/")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // canonical is from with ctr's environment and nothing else of ctr's.

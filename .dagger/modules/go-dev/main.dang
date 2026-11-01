@@ -899,6 +899,20 @@ type GoDev {
     let builtBehindMount = go(base: behindMount).packages(ws).get(key: ".").binary(ws)
     let outBehindMount = behindMount.withFile("/usr/local/bin/offline", builtBehindMount).withExec(["offline"]).stdout
     assert(outBehindMount == "42\n", "the binary built from a module cache behind a symlink into a mount printed: " + outBehindMount)
+
+    # The same cache inside a cache volume the base mounts above it, which
+    # the build keeps as it isn't a Go cache's own.
+    let inVolume = container
+      .from("golang:1.25-alpine")
+      .withMountedCache("/go", cacheVolume("go-dev-filled-modcache-volume"))
+      .withMountedDirectory("/filled", made.directory("/go/pkg/mod"))
+      .withExec(["sh", "-c", "mkdir -p /go/pkg/mod && cp -a /filled/. /go/pkg/mod/"])
+      .withoutMount("/filled")
+      .withEnvVariable("GOPROXY", "off")
+      .withEnvVariable("GOSUMDB", "off")
+    let builtInVolume = go(base: inVolume).packages(ws).get(key: ".").binary(ws)
+    let outInVolume = inVolume.withFile("/usr/local/bin/offline", builtInVolume).withExec(["offline"]).stdout
+    assert(outInVolume == "42\n", "the binary built from a module cache in a cache volume mounted above it printed: " + outInVolume)
     null
   }
 
