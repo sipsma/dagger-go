@@ -7,7 +7,7 @@
 source = "github.com/dagger/dang-sdk@collections"
 
 [modules.go-sdk]
-source = "github.com/dagger/go-sdk@3adb1f41d00bf45536e727d5baa8ec0ab28c9fd8"
+source = "github.com/dagger/go-sdk@32cc3d6b00bd7b24422646c83c90e06887d33044"
 
 [modules.go-dev]
 source = ".dagger/modules/go-dev"

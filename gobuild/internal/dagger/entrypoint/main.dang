@@ -16,6 +16,7 @@ type Entrypoint implements ModuleEntrypoint {
       .withWorkdir("/workspace/" + currentModule.sourceSubpath)
       .withEnvVariable("CGO_ENABLED", "0")
       .withEnvVariable("GOWORK", "off")
+      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
       .withEnvVariable("GOOS", target.takeFirst(1).join(""))
       .withEnvVariable("GOARCH", target.takeFirst(2).takeLast(1).join(""))
       .withExec(["sh", "-c", "go build -o /tmp/dispatch/dispatch . 2>/tmp/build.log && exit 0; cat /tmp/build.log >&2; grep -q -e 'no required module provides package' -e 'replacement directory' -e 'no matching files found' /tmp/build.log && echo 'The build misses files outside the module directory: run dagger generate after changing go.mod replace directives, the imports from a replace target or their embeds.' >&2; exit 1"])
